@@ -1,0 +1,114 @@
+# pi-math-renderer
+
+A pi extension that renders LaTeX display math as real images inside pi's markdown, using the kitty graphics protocol.
+
+Instead of reading `∫₀¹ x² dx = 1/3` as a line of Unicode, the formula is typeset by [typst](https://typst.app) (LaTeX via [MiTeX](https://github.com/mitex-rs/mitex)) and drawn as an image in place of the source, in the current theme's text colour.
+
+```
+$$
+\int_0^1 x^2 \, dx = \frac{1}{3}
+$$
+```
+
+becomes a rendered formula spanning as many terminal cells as it needs, and scrolls, resizes and redraws like ordinary text.
+
+## Requirements
+
+- pi's default `regular` TUI mode (see [Limitations](#limitations))
+- A kitty graphics capable terminal (kitty, Ghostty, WezTerm, Warp)
+- The render service from [math-conceal.nvim](https://github.com/pxwg/math-conceal.nvim):
+
+  ```vim
+  :Rocks install math-conceal-service
+  ```
+
+  or a source build of `service/` from that repository. The extension looks for `typst-concealer-service` in the rocks tree (`$XDG_DATA_HOME/nvim/rocks/bin`), then on `PATH`.
+
+The first render of a formula that uses a MiTeX package downloads nothing: the service embeds typst and resolves `@preview/mitex` from typst's package cache, which `:Rocks install` or a previous math-conceal render populates.
+
+## Install
+
+Install this directory as a local pi package:
+
+```bash
+pi install /path/to/math-renderer
+```
+
+Or load it for a single run:
+
+```bash
+pi --extension /path/to/math-renderer/src/index.ts
+```
+
+## How it works
+
+1. A [markdown transformer](https://github.com/earendil-works/pi) scans each rendered message for display math, using the same block rules as pi's own renderer: `$$…$$` or `\[…\]` at the start of a line (at most three leading spaces), closing at end of line. Inline math (`$…$`, `\(…\)`) is left alone for pi's Unicode renderer, and fenced code blocks are skipped.
+2. Uncached formulas are rendered in one batch by the math-conceal service (`render_formulas` over stdio JSON). The service is invoked synchronously so the image exists while the line is being produced; a cold batch costs ~140 ms regardless of how many formulas it contains, and cached formulas never reach the service.
+3. Streaming messages are transformed too, so a `$$…$$` block becomes an image on the delta that closes it instead of when the message is delivered. Nothing half-written reaches typst: a block only matches once its closing delimiter is at end of line, and a formula whose source is still changing simply keeps its LaTeX until it settles.
+4. Each formula becomes an image line plus blank filler lines: a kitty placement (`c`x`r` cells, transmitted by file path, `C=1` so the terminal does not move the cursor) followed by the blank lines that occupy the rest of the rectangle. pi writes image lines verbatim and pads the filler lines, so the image occupies its rows without pi needing to know anything about images.
+5. Every placement is drawn with its own image id, and the id stays inside signed 32-bit. pi tracks images by the id on a line, and deleting that id removes *every* placement carrying it, so two placements that shared an id would erase each other; a negative id is dropped by the terminal outright.
+6. The image line starts with a reset escape before its centring spaces: a markdown line whose first character is a space would be indented by four or more columns and read as a code block.
+
+Geometry is exact rather than approximate: formulas are rendered at a ppi that maps the 11pt baseline onto one cell height, and the typst document snaps the formula box to whole cells, so a 13x3 cell placement is a 13x3 cell image.
+
+Rows are deliberately *not* one line per image row. pi renders one markdown paragraph per line, and consecutive paragraphs are separated by an empty line, which would cut a multi-row image into bands. The `test/image-block.test.ts` layout test renders the block through pi's own `Markdown` component and asserts the block occupies exactly as many lines as the image has rows.
+
+## Caching
+
+`~/.pi/agent/math-renderer/` holds the rendered PNGs and an `index.json` mapping render kind to file. The key covers the LaTeX source, theme colour, baseline, cell size and ppi, so:
+
+- a formula renders once per machine and colour, then is served from disk,
+- switching themes re-renders formulas in the new colour,
+- a failure (unsupported LaTeX, missing package) is remembered for the session instead of retrying on every render.
+
+## Configuration
+
+Environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PI_MATH_RENDERER` | on | `0` disables the extension |
+| `PI_MATH_RENDERER_SERVICE` | auto | Path or name of `typst-concealer-service` |
+| `PI_MATH_RENDERER_COLOR` | theme text colour | `#rrggbb` override for formula colour |
+| `PI_MATH_RENDERER_BASELINE_PT` | `11` | Typst baseline, one baseline equals one cell |
+| `PI_MATH_RENDERER_PPI` | derived | Override the derived ppi |
+| `PI_MATH_RENDERER_TIMEOUT_MS` | `30000` | Per-batch service timeout |
+| `PI_MATH_RENDERER_DEBUG` | off | Append a log to `~/.pi/agent/math-renderer/debug.log` |
+
+CLI flag and command:
+
+- `--no-math-images` disables rendering for one run
+- `/math-renderer` reports whether rendering is active, which service binary is in use, and the baseline
+
+The transformer runs inside pi's render path, so a formula that is not cached yet blocks the frame for the length of one service call (~140 ms) — once per formula, at the moment it first appears; every later redraw, including each streaming delta, is served from the cache. A transform renders all of its uncached formulas in that single call, because one batch costs the same as one formula and a deferred render has no reliable second chance.
+
+## Limitations
+
+- **Display math only.** An image is one or more whole terminal lines, so inlining one inside a sentence would break the surrounding paragraph's wrapping. Inline math stays with pi's built-in Unicode LaTeX renderer.
+- **Fullscreen TUI mode is not supported.** pi's alternate-screen renderer manages images itself, from a metadata registry that only its own `Image` component populates. A placement injected through markdown is not in that registry, so a frame that needs an image redraw deletes every placement and re-emits only the rows it changed — the markdown image lines above come back blank. In `fullscreen` mode the extension stays inactive and display math falls back to pi's Unicode renderer.
+- **Kitty graphics only.** Detection uses pi-tui's terminal capabilities; `PI_IMAGE_PROTOCOL` overrides it.
+- **A formula is one image line to pi.** pi can only reserve rows for an image whose following lines are zero-width, and markdown pads every non-image line to the full width, so a block is booked as a single image row. A formula placed on the last row of the viewport is therefore clipped by the terminal until the screen next scrolls; kitty keeps the whole placement and redraws it complete at the new position.
+- **Formulas are images:** they cannot be selected or copied as text, and the LaTeX source remains in the session for the model.
+
+## Development
+
+```bash
+npm install
+npm run check     # typecheck + unit tests
+```
+
+Unit tests cover kitty command building, cell geometry, typst document shape, markdown scanning, the transform pass (including the streaming path), block assembly and image ids, the render index, configuration guards, and the rendered line structure of an image block.
+
+There is no automated terminal test. These kitty behaviours were established by driving a hidden kitty window through `kitty-use` and reading the captured pixels; they are the constraints the placement code is built around:
+
+- `i=` ids are accepted up to 32-bit unsigned, but a placement with a **negative** id is dropped with no response at all (`q=2` silences the error). JavaScript's `&` turns any id above 2^31 negative, which is why ids are clamped numerically instead.
+- `d=I,i=<id>` deletes the image data **and every placement** of that id, so an id must never be shared.
+- Erasing a line (`CSI 2 K`) does not remove a placement that overlaps it.
+- A placement that extends past the bottom row is clipped, and kitty redraws it whole once the content scrolls.
+
+When capturing a screen for pixel checks: a framebuffer thumbnail only reflects the most recent frame, so an image drawn earlier comes back missing even though it is on screen. Redraw the frame you want to inspect before capturing.
+
+## Acknowledgements
+
+- [math-conceal.nvim](https://github.com/pxwg/math-conceal.nvim) — the kitty placeholder encoding, cell-grid sizing and typst styling prelude in this extension are ports of its Lua implementation, and the render service is its Rust binary.
+- [MiTeX](https://github.com/mitex-rs/mitex) — LaTeX parsing for typst.
