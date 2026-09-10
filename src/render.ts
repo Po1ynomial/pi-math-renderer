@@ -10,7 +10,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { DEFAULT_BASELINE_PT, type CellSize, naturalCells, renderPpi } from "./layout.ts";
 import {
   type RenderedFormula,
@@ -269,10 +269,18 @@ export class FormulaRenderer {
     for (const response of responses) {
       const item = pending.find((candidate) => candidate.node.nodeId === response.nodeId);
       if (!item) continue;
-      if (response.status !== "ok" || !response.path || !response.widthPx || !response.heightPx) {
+      const fail = (reason: string): void => {
         this.failedKeys.add(item.key);
-        const reason = response.diagnostics.join("; ") || "unknown error";
         this.options.log?.(`formula render failed: ${reason}`);
+      };
+      if (response.status !== "ok" || !response.path || !response.widthPx || !response.heightPx) {
+        fail(response.diagnostics.join("; ") || "unknown error");
+        continue;
+      }
+      // The placement hands the path to the terminal, which resolves relative
+      // paths against its own working directory.
+      if (!isAbsolute(response.path)) {
+        fail(`render service returned a relative output path: ${response.path}`);
         continue;
       }
       const entry: RenderEntry = {

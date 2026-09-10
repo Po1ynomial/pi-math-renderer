@@ -143,6 +143,24 @@ test("binary resolution prefers explicit, then env, then installed copies", () =
   }
 });
 
+test("a relative override must be executable as well", () => {
+  const directory = mkdtempSync(join(tmpdir(), "pi-math-renderer-rel-"));
+  const cwd = process.cwd();
+  try {
+    const name = "rel-service";
+    writeFileSync(join(directory, name), "not executable");
+    chmodSync(join(directory, name), 0o644);
+    process.chdir(directory);
+    // exists, but not executable: still unusable
+    assert.equal(resolveServiceBinary(name, { PATH: "" }, directory), undefined);
+    chmodSync(join(directory, name), 0o755);
+    assert.equal(resolveServiceBinary(name, { PATH: "" }, directory), name);
+  } finally {
+    process.chdir(cwd);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("a missing or non-executable override disables rendering", () => {
   const directory = mkdtempSync(join(tmpdir(), "pi-math-renderer-bin-"));
   try {

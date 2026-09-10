@@ -114,6 +114,13 @@ export default function mathRenderer(pi: ExtensionAPI): void {
 
   pi.registerMarkdownTransformer((markdown, context) => {
     if (pi.getFlag("no-math-images") === true) return markdown;
-    return renderDisplayMath(markdown, context, session.renderer, log);
+    // pi contains a throw from a transformer, but the fallback should be the
+    // untouched message, not whatever the pass had produced so far.
+    try {
+      return renderDisplayMath(markdown, context, session.renderer, log);
+    } catch (error) {
+      log(`transform failed: ${String(error)}`);
+      return markdown;
+    }
   });
 }

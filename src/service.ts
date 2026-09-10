@@ -13,7 +13,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, join, isAbsolute } from "node:path";
 import { homedir } from "node:os";
 
@@ -235,7 +235,9 @@ export function resolveServiceBinary(
     if (isAbsolute(override)) return isExecutable(override) ? override : undefined;
     const onPath = lookUpOnPath(override, env);
     if (onPath) return onPath;
-    return existsSync(override) ? override : undefined;
+    // A relative path is resolved against the working directory, and must be
+    // executable like any other candidate.
+    return isExecutable(override) ? override : undefined;
   }
   for (const candidate of rocksBinCandidates(env, home)) {
     if (isExecutable(candidate)) return candidate;

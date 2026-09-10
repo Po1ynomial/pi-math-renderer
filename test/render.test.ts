@@ -239,6 +239,49 @@ test("a new theme colour forces a fresh render", () => {
   }
 });
 
+test("a relative output path is treated as a failed render", () => {
+  // The path goes straight into the kitty command, where the terminal resolves
+  // relative paths against its own working directory.
+  const directory = temporaryDirectory();
+  try {
+    const logs: string[] = [];
+    const spawn: SpawnSyncFn = (_command, _args, options) => {
+      const request = JSON.parse(options.input.trim()) as { nodes: { node_id: string }[] };
+      return {
+        status: 0,
+        stdout: `${request.nodes
+          .map((node) =>
+            JSON.stringify({
+              type: "formula_rendered",
+              node_id: node.node_id,
+              status: "ok",
+              path: "formula.png",
+              width_px: 132,
+              height_px: 30,
+            }),
+          )
+          .join("\n")}\n`,
+        stderr: "",
+      };
+    };
+    const renderer = new FormulaRenderer({
+      serviceBinary: "/opt/service",
+      cacheDir: directory,
+      root: directory,
+      colorHex: () => "#fff",
+      cellSize: () => CELL,
+      spawnSync: spawn,
+      log: (message) => logs.push(message),
+    });
+    const rendered = renderer.renderMissing(["x^2"].map(block));
+    assert.equal(rendered.size, 0);
+    assert.equal(renderer.cached(block("x^2")), undefined);
+    assert.match(logs.join("\n"), /relative output path/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("failed formulas are remembered for the session", () => {
   const directory = temporaryDirectory();
   try {
