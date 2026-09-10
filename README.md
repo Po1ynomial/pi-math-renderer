@@ -15,7 +15,7 @@ becomes a formula spanning as many terminal cells as it needs, and scrolls, resi
 ## Requirements
 
 - pi's default `regular` TUI mode (see [Limitations](#limitations))
-- A kitty graphics capable terminal (kitty, Ghostty, WezTerm, Warp)
+- A terminal whose kitty graphics support includes the parts the placement uses: PNG images (`f=100`) transmitted by **file path** (`t=f`), `C=1` (the host owns cursor movement) and `q=2` (which also means an unsupported command fails silently rather than drawing a fallback). Detection uses pi-tui's capability probe, which only distinguishes the protocol, not these features; `PI_IMAGE_PROTOCOL` overrides it if a terminal is mis-detected.
 - The render service from [math-conceal.nvim](https://github.com/pxwg/math-conceal.nvim):
 
   ```vim
@@ -24,7 +24,7 @@ becomes a formula spanning as many terminal cells as it needs, and scrolls, resi
 
   or a source build of `service/` from that repository. The extension looks for `typst-concealer-service` in the rocks tree (`$XDG_DATA_HOME/nvim/rocks/bin`), then on `PATH`.
 
-The first render of a formula that uses a MiTeX package downloads nothing: the service embeds typst and resolves `@preview/mitex` from typst's package cache, which `:Rocks install` or a previous math-conceal render populates.
+The service embeds typst, so no LaTeX or typst toolchain is needed. The MiTeX package itself (`@preview/mitex`) comes from typst's package cache: a previous math-conceal render or a `:Rocks install` populates it, and **the first render of a formula on a machine where it is missing fetches it from the network**. For an offline or air-gapped setup, pre-populate the cache or point `TYPST_PACKAGE_PATH` (a directory of already unpacked packages) and `TYPST_PACKAGE_CACHE_PATH` at it; those are the service's own environment variables.
 
 ## Install
 
@@ -42,7 +42,7 @@ pi --extension /path/to/math-renderer/src/index.ts
 
 ## How it works
 
-1. A [markdown transformer](https://github.com/earendil-works/pi) scans each rendered message for math, using the same rules as pi's own renderer. Display math is `$$…$$` or `\[…\]` at the start of a line (at most three leading spaces), closing at end of line; inline math is `$…$`, `\(…\)` or `\[…\]` inside a line, with pi's guards against prices, `A_B` identifiers, whitespace-padded bodies and code spans. Fenced code blocks and indented code blocks are skipped.
+1. A [markdown transformer](https://github.com/earendil-works/pi) scans each rendered message for math, using the same rules as pi's own renderer. pi runs the hook for user, assistant and thinking markdown only, so tool output is never transformed, and neither is Markdown rendered by other components. Display math is `$$…$$` or `\[…\]` at the start of a line (at most three leading spaces), closing at end of line; inline math is `$…$`, `\(…\)` or `\[…\]` inside a line, with pi's guards against prices, `A_B` identifiers, whitespace-padded bodies and code spans. Fenced code blocks and indented code blocks are skipped.
 2. Uncached formulas are rendered in one batch by the math-conceal service (`render_formulas` over stdio JSON). The service is invoked synchronously so the image exists while the line is being produced; a cold batch costs ~140 ms regardless of how many formulas it contains, and cached formulas never reach the service.
 3. Streaming messages are transformed too, so a `$$…$$` block becomes an image on the delta that closes it instead of when the message is delivered. Nothing half-written reaches typst: a block only matches once its closing delimiter is at end of line, and a formula whose source is still changing simply keeps its LaTeX until it settles.
 4. Each formula becomes an image line plus blank filler lines: a kitty placement (`c`x`r` cells, transmitted by file path, `C=1` so the terminal does not move the cursor) followed by the blank lines that occupy the rest of the rectangle. pi writes image lines verbatim and pads the filler lines, so the image occupies its rows without pi needing to know anything about images.
@@ -60,9 +60,11 @@ Rows are deliberately *not* one line per image row. pi renders one markdown para
 
 `~/.pi/agent/math-renderer/` holds the rendered PNGs and an `index.json` mapping render kind to file. The key covers the LaTeX source, theme colour, baseline, cell size and ppi, so:
 
-- a formula renders once per machine, colour and display kind, then is served from disk,
-- switching themes re-renders formulas in the new colour,
+- a formula renders once per machine, colour, cell size, ppi and display kind, then is served from disk,
+- switching themes re-renders formulas in the new colour (pi invalidates its render cache on a theme change, which re-runs the transformer),
 - a failure (unsupported LaTeX, missing package) is remembered for the session instead of retrying on every render.
+
+Nothing evicts this cache: PNGs and index entries accumulate, one per distinct key, and `PI_MATH_RENDERER_DEBUG` appends to `debug.log` without rotating. `rm -rf ~/.pi/agent/math-renderer` resets it; the next render rebuilds what it needs (roughly 140 ms per batch).
 
 ## Configuration
 
@@ -74,7 +76,7 @@ Environment variables:
 | `PI_MATH_RENDERER_SERVICE` | auto | Path or name of `typst-concealer-service` |
 | `PI_MATH_RENDERER_COLOR` | theme text colour | `#rrggbb` override for formula colour |
 | `PI_MATH_RENDERER_BASELINE_PT` | `11` | Typst baseline, one baseline equals one cell |
-| `PI_MATH_RENDERER_PPI` | derived | Override the derived ppi |
+| `PI_MATH_RENDERER_PPI` | derived | Override the derived ppi (see below) |
 | `PI_MATH_RENDERER_TIMEOUT_MS` | `30000` | Per-batch service timeout |
 | `PI_MATH_RENDERER_DEBUG` | off | Append a log to `~/.pi/agent/math-renderer/debug.log` |
 
@@ -82,6 +84,8 @@ CLI flag and command:
 
 - `--no-math-images` disables rendering for one run
 - `/math-renderer` reports whether rendering is active, which service binary is in use, and the baseline
+
+`PI_MATH_RENDERER_PPI` is a diagnostic override. The derived value is what makes one typst baseline exactly one terminal cell, so the typst box snaps to whole cells and `px -> cells` stays exact; an arbitrary ppi generally breaks that and the placement is scaled to a rounded cell box. Leave it unset unless you are chasing a rendering problem.
 
 The transformer runs inside pi's render path, so a formula that is not cached yet blocks the frame for the length of one service call (~140 ms) — once per formula, at the moment it first appears; every later redraw, including each streaming delta, is served from the cache. A transform renders all of its uncached formulas in that single call, because one batch costs the same as one formula and a deferred render has no reliable second chance.
 
@@ -109,10 +113,11 @@ There is no automated terminal test. These kitty behaviours were established by 
 - `d=I,i=<id>` deletes the image data **and every placement** of that id, so an id must never be shared.
 - Erasing a line (`CSI 2 K`) does not remove a placement that overlaps it.
 - A placement that extends past the bottom row is clipped, and kitty redraws it whole once the content scrolls.
+- Placements get a fresh image id on every transform, because ids must never be shared. A streaming message is transformed on every delta, so its placements are re-emitted each time — about 100 bytes each and no image data, since `t=f` only sends the path.
 
 When capturing a screen for pixel checks: a framebuffer thumbnail only reflects the most recent frame, so an image drawn earlier comes back missing even though it is on screen. Redraw the frame you want to inspect before capturing.
 
 ## Acknowledgements
 
-- [math-conceal.nvim](https://github.com/pxwg/math-conceal.nvim) — the kitty placeholder encoding, cell-grid sizing and typst styling prelude in this extension are ports of its Lua implementation, and the render service is its Rust binary.
+- [math-conceal.nvim](https://github.com/pxwg/math-conceal.nvim) — the cell-grid sizing (`grid.lua`), the typst snapping wrapper (`image/wrapper.lua`) and the styling prelude are ports of its Lua implementation, and the render service is its Rust binary. Its Unicode-placeholder encoding is deliberately *not* used: pi writes a line carrying an escape verbatim, so a placeholder grid cannot span rows here.
 - [MiTeX](https://github.com/mitex-rs/mitex) — LaTeX parsing for typst.

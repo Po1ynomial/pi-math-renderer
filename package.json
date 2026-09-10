@@ -1,7 +1,7 @@
 {
   "name": "pi-math-renderer",
-  "version": "0.1.0",
-  "description": "Render LaTeX display math as kitty images inside pi",
+  "version": "0.2.0",
+  "description": "Render LaTeX math (display and inline) as kitty images inside pi",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -32,5 +32,6 @@
   },
   "engines": {
     "node": ">=22.19.0"
-  }
+  },
+  "author": "Yejia Mo"
 }
