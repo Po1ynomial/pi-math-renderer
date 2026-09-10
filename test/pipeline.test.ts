@@ -10,16 +10,16 @@ function stubRenderer() {
   const entries = new Map<string, RenderEntry>();
   const requested: string[][] = [];
   const stub: MessageRenderer = {
-    cached(latex) {
-      return entries.get(latex);
+    cached(request) {
+      return entries.get(request.latex);
     },
     placement() {
       return { cols: 13, rows: 3 };
     },
-    renderMissing(latexSources) {
-      requested.push([...latexSources]);
+    renderMissing(requests) {
+      requested.push(requests.map((request) => request.latex));
       const rendered = new Map<string, RenderEntry>();
-      for (const latex of latexSources) {
+      for (const { latex } of requests) {
         const index = entries.size;
         const entry: RenderEntry = {
           key: `key-${index}`,
@@ -105,9 +105,36 @@ test("fenced code keeps its source even when it looks like display math", () => 
   assert.deepEqual(requested, []);
 });
 
-test("markdown without display math is returned untouched", () => {
+test("markdown without math is returned untouched", () => {
   const { stub, requested } = stubRenderer();
-  const markdown = "just prose, with an inline $x$ and nothing else";
+  const markdown = "just prose, with no math at all";
   assert.equal(renderDisplayMath(markdown, context(), stub), markdown);
   assert.deepEqual(requested, []);
+});
+
+test("inline math becomes a one-row image inside its line", () => {
+  const { stub } = stubRenderer();
+  const markdown = "The value is $x^{2}$ here.";
+  const output = renderDisplayMath(markdown, context(), stub);
+  assert.ok(output.includes("\x1b_Ga=T,f=100"), "inline span should become an image");
+  assert.ok(output.includes("\x1b_Ga=T,f=100,q=2,t=f,c=13,r=1,C=1"), "inline placement is one row tall");
+  assert.ok(!output.includes("$x^{2}$"), "the source should be gone");
+  assert.ok(output.startsWith("The value is "), output);
+  assert.ok(output.endsWith(" here."), output);
+});
+
+test("inline math is rendered while the message is still streaming", () => {
+  const { stub } = stubRenderer();
+  const output = renderDisplayMath("The value is $x^{2}$ here", context({ isStreaming: true }), stub);
+  assert.ok(output.includes("\x1b_G"));
+  assert.ok(!output.includes("$x^{2}$"));
+});
+
+test("inline math and display math in one message are both replaced", () => {
+  const { stub } = stubRenderer();
+  const markdown = "Inline $a^{2}$ then a block:\n\n$$\n${FORMULA}\n$$\n";
+  const output = renderDisplayMath(markdown, context(), stub);
+  assert.equal([...output.matchAll(/\x1b_G/g)].length, 2);
+  assert.ok(!output.includes("$a^{2}$"));
+  assert.ok(!output.includes("\\frac{1}{3}"));
 });

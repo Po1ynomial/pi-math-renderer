@@ -3,7 +3,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { FormulaRenderer, nodeIdFor, RenderIndex, renderKey } from "../src/render.ts";
+import {
+  FormulaRenderer,
+  nodeIdFor,
+  RenderIndex,
+  renderKey,
+  requestId,
+  type FormulaRequest,
+} from "../src/render.ts";
 import type { SpawnSyncFn } from "../src/service.ts";
 
 const CELL = { widthPx: 11, heightPx: 30 };
@@ -35,8 +42,11 @@ function successfulSpawn(pngPath: string): { spawn: SpawnSyncFn; calls: string[]
   return { spawn, calls };
 }
 
+/** Most tests only care about block math; inline requests are built inline. */
+const block = (latex: string): FormulaRequest => ({ latex, display: "block" });
+
 test("render keys depend on everything that changes pixels", () => {
-  const base = { latex: "x^2", colorHex: "#e5e5e7", baselinePt: 11, cell: CELL, ppi: 196 };
+  const base = { latex: "x^2", display: "block" as const, colorHex: "#e5e5e7", baselinePt: 11, cell: CELL, ppi: 196 };
   const key = renderKey(base);
   assert.match(key, /^[0-9a-f]{40}$/);
   assert.equal(key, renderKey({ ...base }));
@@ -47,8 +57,46 @@ test("render keys depend on everything that changes pixels", () => {
   assert.notEqual(key, renderKey({ ...base, ppi: 118 }));
 });
 
+test("block and inline renders of one formula are separate cache entries", () => {
+  // The display kind changes the pixels: block math is snapped to whole cells,
+  // inline math is clipped to one. A shared key would serve one kind's PNG to
+  // the other.
+  const directory = temporaryDirectory();
+  try {
+    const png = join(directory, "formula.png");
+    writeFileSync(png, "png");
+    const { spawn, calls } = successfulSpawn(png);
+    const renderer = new FormulaRenderer({
+      serviceBinary: "/opt/service",
+      cacheDir: directory,
+      root: directory,
+      colorHex: () => "#e5e5e7",
+      baselinePt: 11,
+      cellSize: () => CELL,
+      spawnSync: spawn,
+    });
+
+    const inline: FormulaRequest = { latex: "x^2", display: "inline" };
+    const blockRequest: FormulaRequest = { latex: "x^2", display: "block" };
+    assert.notEqual(
+      renderKey({ latex: "x^2", display: "inline", colorHex: "#e5e5e7", baselinePt: 11, cell: CELL, ppi: renderer.ppi() }),
+      renderKey({ latex: "x^2", display: "block", colorHex: "#e5e5e7", baselinePt: 11, cell: CELL, ppi: renderer.ppi() }),
+    );
+
+    renderer.renderMissing([blockRequest]);
+    assert.ok(renderer.cached(blockRequest));
+    assert.equal(renderer.cached(inline), undefined, "inline must not read the block entry");
+
+    renderer.renderMissing([inline]);
+    assert.ok(renderer.cached(inline));
+    assert.equal(calls.length, 2, "the two kinds render separately");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("node ids are stable per key and valid file name stems", () => {
-  const key = renderKey({ latex: "x", colorHex: "#fff", baselinePt: 11, cell: CELL, ppi: 196 });
+  const key = renderKey({ latex: "x", display: "block", colorHex: "#fff", baselinePt: 11, cell: CELL, ppi: 196 });
   assert.equal(nodeIdFor(key), nodeIdFor(key));
   assert.match(nodeIdFor(key), /^pi-mr-[0-9a-f]{24}$/);
 });
@@ -104,15 +152,18 @@ test("renderer renders missing formulas once and caches them", () => {
       spawnSync: spawn,
     });
 
-    assert.equal(renderer.cached("x^2"), undefined);
-    const rendered = renderer.renderMissing(["x^2", "y^2", "x^2"]);
+    assert.equal(renderer.cached(block("x^2")), undefined);
+    const rendered = renderer.renderMissing(["x^2", "y^2", "x^2"].map(block));
     assert.equal(rendered.size, 2);
     assert.equal(calls.length, 1, "one batch for both formulas");
-    assert.equal(renderer.cached("x^2")?.path, png);
-    assert.deepEqual(renderer.placement(rendered.get("x^2")!), { cols: 12, rows: 1 });
+    assert.equal(renderer.cached(block("x^2"))?.path, png);
+    assert.deepEqual(
+      renderer.placement(rendered.get(requestId({ latex: "x^2", display: "block" }))!),
+      { cols: 12, rows: 1 },
+    );
 
     // Second pass is served from the index without spawning again.
-    const again = renderer.renderMissing(["x^2"]);
+    const again = renderer.renderMissing(["x^2"].map(block));
     assert.equal(again.size, 1);
     assert.equal(calls.length, 1);
 
@@ -126,7 +177,7 @@ test("renderer renders missing formulas once and caches them", () => {
       cellSize: () => CELL,
       spawnSync: spawn,
     });
-    assert.equal(reloaded.cached("x^2")?.path, png);
+    assert.equal(reloaded.cached(block("x^2"))?.path, png);
     assert.equal(calls.length, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -173,13 +224,13 @@ test("a new theme colour forces a fresh render", () => {
       spawnSync: spawn,
     });
 
-    renderer.renderMissing(["x^2"]);
+    renderer.renderMissing(["x^2"].map(block));
     assert.equal(calls.length, 1);
     color = "#000000";
     path = second;
-    const rendered = renderer.renderMissing(["x^2"]);
+    const rendered = renderer.renderMissing(["x^2"].map(block));
     assert.equal(calls.length, 2);
-    assert.equal(rendered.get("x^2")?.path, second);
+    assert.equal(rendered.get(requestId({ latex: "x^2", display: "block" }))?.path, second);
 
     const context = JSON.parse(calls[1]!.trim()) as { context_source: string };
     assert.match(context.context_source, /rgb\("#000000"\)/);
@@ -209,10 +260,10 @@ test("failed formulas are remembered for the session", () => {
       cellSize: () => CELL,
       spawnSync: spawn,
     });
-    assert.equal(renderer.renderMissing(["broken"]).size, 0);
-    assert.equal(renderer.renderMissing(["broken"]).size, 0);
+    assert.equal(renderer.renderMissing(["broken"].map(block)).size, 0);
+    assert.equal(renderer.renderMissing(["broken"].map(block)).size, 0);
     assert.equal(calls, 1);
-    assert.equal(renderer.cached("broken"), undefined);
+    assert.equal(renderer.cached(block("broken")), undefined);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -236,12 +287,12 @@ test("an unavailable service disables rendering after the first attempt", () => 
     spawnSync: spawn,
     log: (message) => logs.push(message),
   });
-  assert.equal(renderer.renderMissing(["x"]).size, 0);
-  assert.equal(renderer.renderMissing(["y"]).size, 0);
+  assert.equal(renderer.renderMissing(["x"].map(block)).size, 0);
+  assert.equal(renderer.renderMissing(["y"].map(block)).size, 0);
   assert.equal(calls, 1);
   assert.equal(renderer.enabled, false);
   assert.match(logs.join("\n"), /unavailable/);
-  assert.equal(renderer.cached("x"), undefined);
+  assert.equal(renderer.cached(block("x")), undefined);
 });
 
 test("one transform renders every uncached formula in one batch", () => {
@@ -280,10 +331,13 @@ test("one transform renders every uncached formula in one batch", () => {
     });
     // Nothing may be deferred: a finalized message is never transformed again,
     // so a formula left for "later" would stay as LaTeX source.
-    const rendered = renderer.renderMissing(["a", "b", "c", "d"]);
+    const rendered = renderer.renderMissing(["a", "b", "c", "d"].map(block));
     assert.equal(rendered.size, 4);
     assert.equal(batches, 1);
-    assert.deepEqual([...rendered.keys()].sort(), ["a", "b", "c", "d"]);
+    assert.deepEqual(
+      [...rendered.keys()].sort(),
+      ["a", "b", "c", "d"].map((latex) => requestId({ latex, display: "block" })).sort(),
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -304,8 +358,8 @@ test("a disabled renderer never spawns", () => {
       spawnSync: spawn,
     });
     assert.equal(renderer.enabled, false);
-    assert.equal(renderer.renderMissing(["x"]).size, 0);
-    assert.equal(renderer.cached("x"), undefined);
+    assert.equal(renderer.renderMissing(["x"].map(block)).size, 0);
+    assert.equal(renderer.cached(block("x")), undefined);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

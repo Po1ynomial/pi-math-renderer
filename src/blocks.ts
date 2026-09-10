@@ -9,13 +9,13 @@
 import { buildImageBlock } from "./image-block.ts";
 import { allocateImageId } from "./kitty.ts";
 import { fitToWidth, type CellPlacement } from "./layout.ts";
-import type { RenderEntry } from "./render.ts";
+import type { FormulaRequest, RenderEntry } from "./render.ts";
 import type { DisplayMathSpan } from "./transform.ts";
 
-/** The part of `FormulaRenderer` that block assembly needs. */
-export interface BlockRenderer {
+/** The part of `FormulaRenderer` that turning a cache hit into a placement needs. */
+export interface PlacementLookup {
   /** Cache lookup only; never touches the render service. */
-  cached(latex: string): RenderEntry | undefined;
+  cached(request: FormulaRequest): RenderEntry | undefined;
   /** Cell placement for a cached entry, for the current terminal. */
   placement(entry: RenderEntry): CellPlacement;
 }
@@ -31,14 +31,14 @@ export interface BlockRenderer {
  * erases every placement of that id while only redrawing the line it rewrote.
  */
 export function buildImageBlocks(
-  renderer: BlockRenderer,
+  renderer: PlacementLookup,
   spans: DisplayMathSpan[],
   availableCols: number,
   log: (message: string) => void = () => {},
 ): Map<DisplayMathSpan, string> {
   const blocks = new Map<DisplayMathSpan, string>();
   for (const span of spans) {
-    const entry = renderer.cached(span.latex);
+    const entry = renderer.cached({ latex: span.latex, display: "block" });
     if (!entry) {
       log(`no image for ${JSON.stringify(span.latex.slice(0, 40))} (cache miss)`);
       continue;

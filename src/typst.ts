@@ -91,6 +91,12 @@ export function sizePrelude(baselinePt = DEFAULT_BASELINE_PT): string {
  *
  * A single-cell-tall formula uses the clipped variant so tall glyphs cannot
  * bleed into the next line; taller formulas grow to the next whole cell row.
+ *
+ * Inline math is always clipped to one cell, at any height: a taller box could
+ * not be inlined at all (it would overlap the text rows around it), and scaling
+ * the formula down instead would change its size mid-sentence. Clipping keeps
+ * upstream math-conceal's anchor (`align(horizon)`, one cell) and cuts the
+ * overflow, exactly like the `__rows <= 1.5` branch of its `inline_wrap`.
  */
 export function snapWrap(
   baselinePt: number,
@@ -106,9 +112,7 @@ export function snapWrap(
       prefix: "#context { let __it = [",
       suffix:
         `${measure} let __rows = __d.height / __mh;` +
-        " if __rows <= 1.5 { block(width: __d.width, height: __mh, clip: true, align(horizon, __it)) }" +
-        " else { let __r = calc.max(1, calc.ceil(__rows - 0.001));" +
-        " block(width: __d.width, height: __r * __mh, align(horizon, __it)) } }\n",
+        " block(width: __d.width, height: __mh, clip: true, align(horizon, __it)) }\n",
     };
   }
   return {
@@ -143,7 +147,7 @@ export function buildContextSource(
  * Node document for one formula, sent inline as a virtual file.
  *
  * Display math always uses the snapping wrapper so both axes land on cell
- * boundaries; inline math (v2) additionally clips to one cell.
+ * boundaries; inline math additionally clips to one cell at any height.
  */
 export function buildNodeSource(
   options: TypstDocumentOptions & { display: MathDisplay },

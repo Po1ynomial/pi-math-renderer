@@ -1,6 +1,6 @@
 # pi-math-renderer
 
-A pi extension that renders LaTeX display math as real images inside pi's markdown, using the kitty graphics protocol.
+A pi extension that renders LaTeX math as real images inside pi's markdown, using the kitty graphics protocol.
 
 Instead of reading `∫₀¹ x² dx = 1/3` as a line of Unicode, the formula is typeset by [typst](https://typst.app) (LaTeX via [MiTeX](https://github.com/mitex-rs/mitex)) and drawn as an image in place of the source, in the current theme's text colour.
 
@@ -10,7 +10,7 @@ $$
 $$
 ```
 
-becomes a rendered formula spanning as many terminal cells as it needs, and scrolls, resizes and redraws like ordinary text.
+becomes a formula spanning as many terminal cells as it needs, and scrolls, resizes and redraws like ordinary text. Display math and inline math both render: an inline `$x^{2}$` becomes a one-cell-tall image inside its sentence, cut at the cell edges rather than scaled down, and streamed messages render as they arrive.
 
 ## Requirements
 
@@ -42,12 +42,15 @@ pi --extension /path/to/math-renderer/src/index.ts
 
 ## How it works
 
-1. A [markdown transformer](https://github.com/earendil-works/pi) scans each rendered message for display math, using the same block rules as pi's own renderer: `$$…$$` or `\[…\]` at the start of a line (at most three leading spaces), closing at end of line. Inline math (`$…$`, `\(…\)`) is left alone for pi's Unicode renderer, and fenced code blocks are skipped.
+1. A [markdown transformer](https://github.com/earendil-works/pi) scans each rendered message for math, using the same rules as pi's own renderer. Display math is `$$…$$` or `\[…\]` at the start of a line (at most three leading spaces), closing at end of line; inline math is `$…$`, `\(…\)` or `\[…\]` inside a line, with pi's guards against prices, `A_B` identifiers, whitespace-padded bodies and code spans. Fenced code blocks and indented code blocks are skipped.
 2. Uncached formulas are rendered in one batch by the math-conceal service (`render_formulas` over stdio JSON). The service is invoked synchronously so the image exists while the line is being produced; a cold batch costs ~140 ms regardless of how many formulas it contains, and cached formulas never reach the service.
 3. Streaming messages are transformed too, so a `$$…$$` block becomes an image on the delta that closes it instead of when the message is delivered. Nothing half-written reaches typst: a block only matches once its closing delimiter is at end of line, and a formula whose source is still changing simply keeps its LaTeX until it settles.
 4. Each formula becomes an image line plus blank filler lines: a kitty placement (`c`x`r` cells, transmitted by file path, `C=1` so the terminal does not move the cursor) followed by the blank lines that occupy the rest of the rectangle. pi writes image lines verbatim and pads the filler lines, so the image occupies its rows without pi needing to know anything about images.
 5. Every placement is drawn with its own image id, and the id stays inside signed 32-bit. pi tracks images by the id on a line, and deleting that id removes *every* placement carrying it, so two placements that shared an id would erase each other; a negative id is dropped by the terminal outright.
 6. The image line starts with a reset escape before its centring spaces: a markdown line whose first character is a space would be indented by four or more columns and read as a code block.
+7. Inline math is placed at the cursor with `r=1` and the cursor is advanced over it with spaces, so the image occupies its cell run inside the line. pi never wraps a line that carries a placement, so the pass re-flows the line itself: each placement is an unbreakable run of `cols` cells, the source line's block structure (indentation, `> ` markers, list alignment) is repeated on continuation rows, and a line that cannot be made to fit — a formula wider than the whole line — keeps its LaTeX for pi's Unicode renderer.
+
+Inline formulas are rendered in MiTeX's inline mode and clipped to exactly one cell (`clip: true`, `align(horizon)` — the anchor math-conceal.nvim uses). A formula taller than the line is **cut** at the cell edges rather than scaled down, so its size stays consistent with the surrounding text; upstream grows the box above 1.5 cells and scales that whole image back into one row, which would shrink the formula mid-sentence.
 
 Geometry is exact rather than approximate: formulas are rendered at a ppi that maps the 11pt baseline onto one cell height, and the typst document snaps the formula box to whole cells, so a 13x3 cell placement is a 13x3 cell image.
 
@@ -57,7 +60,7 @@ Rows are deliberately *not* one line per image row. pi renders one markdown para
 
 `~/.pi/agent/math-renderer/` holds the rendered PNGs and an `index.json` mapping render kind to file. The key covers the LaTeX source, theme colour, baseline, cell size and ppi, so:
 
-- a formula renders once per machine and colour, then is served from disk,
+- a formula renders once per machine, colour and display kind, then is served from disk,
 - switching themes re-renders formulas in the new colour,
 - a failure (unsupported LaTeX, missing package) is remembered for the session instead of retrying on every render.
 
@@ -84,7 +87,8 @@ The transformer runs inside pi's render path, so a formula that is not cached ye
 
 ## Limitations
 
-- **Display math only.** An image is one or more whole terminal lines, so inlining one inside a sentence would break the surrounding paragraph's wrapping. Inline math stays with pi's built-in Unicode LaTeX renderer.
+- **A formula wider than the line stays as LaTeX.** Kitty placements cannot be split across terminal rows, so a formula that needs more than the full content width (a wide matrix, say) is left to pi's Unicode renderer. Multi-line inline math (`$…$` spanning lines) is also left alone.
+- **Inline math makes its whole line an image line to pi.** Such a line is written verbatim, which is what lets the re-flow own the layout — but pi then skips it for selection and search highlighting. The text is still in the session for the model, and copying reads the line with the escapes stripped.
 - **Fullscreen TUI mode is not supported.** pi's alternate-screen renderer manages images itself, from a metadata registry that only its own `Image` component populates. A placement injected through markdown is not in that registry, so a frame that needs an image redraw deletes every placement and re-emits only the rows it changed — the markdown image lines above come back blank. In `fullscreen` mode the extension stays inactive and display math falls back to pi's Unicode renderer.
 - **Kitty graphics only.** Detection uses pi-tui's terminal capabilities; `PI_IMAGE_PROTOCOL` overrides it.
 - **A formula is one image line to pi.** pi can only reserve rows for an image whose following lines are zero-width, and markdown pads every non-image line to the full width, so a block is booked as a single image row. A formula placed on the last row of the viewport is therefore clipped by the terminal until the screen next scrolls; kitty keeps the whole placement and redraws it complete at the new position.

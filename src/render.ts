@@ -19,10 +19,10 @@ import {
   RenderServiceError,
   type SpawnSyncFn,
 } from "./service.ts";
-import { buildContextSource, buildNodeSource } from "./typst.ts";
+import { buildContextSource, buildNodeSource, type MathDisplay } from "./typst.ts";
 
 /** Bump to invalidate every cached PNG after a rendering change. */
-const RENDERER_VERSION = "1";
+const RENDERER_VERSION = "2";
 
 /** One rendered formula on disk. */
 export interface RenderEntry {
@@ -32,8 +32,26 @@ export interface RenderEntry {
   heightPx: number;
 }
 
+/**
+ * A formula to render.
+ *
+ * The display kind is part of the request because it changes the pixels: block
+ * math is snapped to whole cells, inline math is clipped to one cell. Two
+ * requests with the same LaTeX and different kinds are different renders.
+ */
+export interface FormulaRequest {
+  latex: string;
+  display: MathDisplay;
+}
+
+/** Stable lookup key for a request; also the key of `renderMissing`'s result. */
+export function requestId(request: FormulaRequest): string {
+  return `${request.display}\u0000${request.latex}`;
+}
+
 export interface RenderKeyInput {
   latex: string;
+  display: MathDisplay;
   colorHex: string;
   baselinePt: number;
   cell: CellSize;
@@ -50,6 +68,7 @@ export interface RenderKeyInput {
 export function renderKey(input: RenderKeyInput): string {
   const canonical = [
     `v${RENDERER_VERSION}`,
+    `display:${input.display}`,
     `formula:${input.latex}`,
     `color:${input.colorHex}`,
     `baseline:${input.baselinePt}`,
@@ -179,9 +198,9 @@ export class FormulaRenderer {
   }
 
   /** Cache lookup only; never touches the service. */
-  cached(latex: string): RenderEntry | undefined {
+  cached(request: FormulaRequest): RenderEntry | undefined {
     if (!this.enabled) return undefined;
-    const key = this.keyFor(latex);
+    const key = this.keyFor(request);
     if (this.failedKeys.has(key)) return undefined;
     return this.index.get(key);
   }
@@ -200,22 +219,26 @@ export class FormulaRenderer {
    * only — a finalized message is never re-transformed, and a deferred formula
    * would stay as LaTeX source for the life of that view.
    */
-  renderMissing(latexSources: string[]): Map<string, RenderEntry> {
+  renderMissing(requests: FormulaRequest[]): Map<string, RenderEntry> {
     const result = new Map<string, RenderEntry>();
     if (!this.enabled) return result;
 
-    const pending: { latex: string; key: string; node: RenderNode }[] = [];
+    const pending: { request: FormulaRequest; key: string; node: RenderNode }[] = [];
     const seen = new Set<string>();
-    for (const latex of latexSources) {
-      const key = this.keyFor(latex);
+    for (const request of requests) {
+      const key = this.keyFor(request);
       if (seen.has(key) || this.failedKeys.has(key)) continue;
       seen.add(key);
       const entry = this.index.get(key);
       if (entry) {
-        result.set(latex, entry);
+        result.set(requestId(request), entry);
         continue;
       }
-      pending.push({ latex, key, node: { nodeId: nodeIdFor(key), source: this.nodeSource(latex) } });
+      pending.push({
+        request,
+        key,
+        node: { nodeId: nodeIdFor(key), source: this.nodeSource(request) },
+      });
     }
     if (pending.length === 0) return result;
 
@@ -259,7 +282,7 @@ export class FormulaRenderer {
         heightPx: response.heightPx,
       };
       this.index.set(entry);
-      result.set(item.latex, entry);
+      result.set(requestId(item.request), entry);
     }
     this.index.save();
     return result;
@@ -270,9 +293,10 @@ export class FormulaRenderer {
     return naturalCells(entry.widthPx, entry.heightPx, this.options.cellSize());
   }
 
-  private keyFor(latex: string): string {
+  private keyFor(request: FormulaRequest): string {
     return renderKey({
-      latex,
+      latex: request.latex,
+      display: request.display,
       colorHex: this.options.colorHex(),
       baselinePt: this.baselinePt(),
       cell: this.options.cellSize(),
@@ -280,10 +304,10 @@ export class FormulaRenderer {
     });
   }
 
-  private nodeSource(latex: string): string {
+  private nodeSource(request: FormulaRequest): string {
     return buildNodeSource({
-      latex,
-      display: "block",
+      latex: request.latex,
+      display: request.display,
       baselinePt: this.baselinePt(),
       cell: this.options.cellSize(),
     });

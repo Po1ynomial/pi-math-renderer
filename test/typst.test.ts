@@ -52,10 +52,17 @@ test("snapping wrapper rounds both axes to whole cells", () => {
   assert.match(suffix, /block\(width: __tw, height: __th, align\(horizon, __it\)\)/);
 });
 
-test("single-row wrapper clips to one cell", () => {
+test("the inline wrapper always clips to one cell", () => {
+  // Upstream math-conceal clips at most 1.5 cells and grows the box above that.
+  // A grown box cannot be inlined at all (it would overlap the text rows around
+  // it) and scaling it down would change the formula's size mid-sentence, so the
+  // clip is unconditional: the formula is cut, never rescaled.
   const { suffix } = snapWrap(11, 4.0333, 1);
   assert.match(suffix, /clip: true/);
-  assert.match(suffix, /__rows <= 1\.5/);
+  assert.match(suffix, /height: __mh/);
+  assert.match(suffix, /align\(horizon/);
+  assert.ok(!suffix.includes("else"), `inline wrapper must not grow: ${suffix}`);
+  assert.ok(!/\*\s*__mh/.test(suffix), `inline wrapper must not grow: ${suffix}`);
 });
 
 test("math call selects the mitex entry point per display kind", () => {

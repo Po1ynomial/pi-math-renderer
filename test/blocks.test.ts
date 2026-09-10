@@ -12,7 +12,8 @@ function stubRenderer(cellRows = 3) {
   const entries = new Map<string, RenderEntry>();
   return {
     entries,
-    cached(latex: string): RenderEntry | undefined {
+    cached(request: { latex: string }): RenderEntry | undefined {
+      const latex = request.latex;
       let entry = entries.get(latex);
       if (!entry) {
         const index = entries.size;
