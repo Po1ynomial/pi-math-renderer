@@ -214,10 +214,11 @@ export class FormulaRenderer {
    *
    * One service call carries the whole batch, and it costs the same whether it
    * holds one formula or thirty (~140 ms for the process, measured), so nothing
-   * is deferred: a transform has no reliable second chance, because pi runs the
-   * transformer for new, streaming and restored messages and on width changes
-   * only — a finalized message is never re-transformed, and a deferred formula
-   * would stay as LaTeX source for the life of that view.
+   * is deferred: a transform has no reliable second chance before the frame is
+   * drawn. pi does run the transformer again with `isStreaming: false` when the
+   * message is finalized (and for restored messages and width changes), but a
+   * formula deferred from one of those passes could still stay as LaTeX source
+   * for the life of the view.
    */
   renderMissing(requests: FormulaRequest[]): Map<string, RenderEntry> {
     const result = new Map<string, RenderEntry>();

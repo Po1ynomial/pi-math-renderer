@@ -82,6 +82,19 @@ export default function mathRenderer(pi: ExtensionAPI): void {
     type: "boolean",
   });
 
+  pi.registerFlag("math-images-streaming", {
+    description: "Experimental: render math while the message streams (quirky, off by default)",
+    type: "boolean",
+  });
+
+  /**
+   * In-flight rendering is opt-in from either the environment or the flag, and
+   * off by default. Read per call: flags are stable, but this keeps the state
+   * in one place for the status command and the transformer.
+   */
+  const streamingEnabled = (): boolean =>
+    config.streaming || pi.getFlag("math-images-streaming") === true;
+
   pi.registerCommand("math-renderer", {
     description: "Show math image rendering status",
     handler: async (_args, ctx) => {
@@ -89,8 +102,10 @@ export default function mathRenderer(pi: ExtensionAPI): void {
       const state = config.enabled && !flagDisabled ? "on" : "off";
       const detail = config.disabledReason ? ` (${config.disabledReason})` : "";
       const service = config.serviceBinary ? config.serviceBinary.split("/").pop() : "not found";
+      const streaming = config.enabled && streamingEnabled() ? "on" : "off";
       ctx.ui.notify(
-        `math images ${state}${detail} · service ${service} · baseline ${config.baselinePt}pt`,
+        `math images ${state}${detail} · streaming ${streaming} (experimental) ·` +
+          ` service ${service} · baseline ${config.baselinePt}pt`,
         "info",
       );
     },
@@ -106,6 +121,7 @@ export default function mathRenderer(pi: ExtensionAPI): void {
     return;
   }
   log(`active with ${config.serviceBinary}`);
+  if (streamingEnabled()) log("streaming rendering enabled (experimental)");
 
   pi.on("session_start", (_event, ctx) => {
     colorProvider = () => config.color ?? colorFromTheme(ctx.ui.theme);
@@ -117,7 +133,9 @@ export default function mathRenderer(pi: ExtensionAPI): void {
     // pi contains a throw from a transformer, but the fallback should be the
     // untouched message, not whatever the pass had produced so far.
     try {
-      return renderDisplayMath(markdown, context, session.renderer, log);
+      return renderDisplayMath(markdown, context, session.renderer, log, {
+        allowStreaming: streamingEnabled(),
+      });
     } catch (error) {
       log(`transform failed: ${String(error)}`);
       return markdown;

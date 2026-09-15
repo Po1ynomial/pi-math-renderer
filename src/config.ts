@@ -4,6 +4,11 @@
  * Everything is optional: with no configuration at all the extension enables
  * itself when the terminal supports kitty images and the render service binary
  * can be found.
+ *
+ * In-flight rendering is the exception: it is off unless explicitly asked for.
+ * It is not a disable reason, though — the extension stays fully active and
+ * math renders when the message is finalized, so `streaming` never touches
+ * `enabled` or `disabledReason`.
  */
 
 import { readFileSync, statSync } from "node:fs";
@@ -25,6 +30,11 @@ export interface Config {
   /** Explicit ppi override; otherwise derived from the cell size. */
   ppi?: number;
   timeoutMs?: number;
+  /**
+   * Experimental: transform streaming messages too, so a formula becomes an
+   * image on the delta that closes it rather than at `message_end`.
+   */
+  streaming: boolean;
   /** Terminal cell size probe; injectable for tests. */
   cellSize?: () => CellSize;
   debug: boolean;
@@ -133,6 +143,7 @@ export function loadConfig(environment: ConfigEnvironment = {}): Config {
     color: parseColor(env.PI_MATH_RENDERER_COLOR),
     ppi: parseNumber(env.PI_MATH_RENDERER_PPI),
     timeoutMs: parseNumber(env.PI_MATH_RENDERER_TIMEOUT_MS),
+    streaming: parseBoolean(env.PI_MATH_RENDERER_STREAMING) === true,
     debug: parseBoolean(env.PI_MATH_RENDERER_DEBUG) === true,
     serviceBinary: resolveServiceBinary(undefined, env, home),
   };

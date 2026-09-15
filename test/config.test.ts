@@ -91,6 +91,34 @@ test("the formula colour can be overridden", () => {
   }
 });
 
+test("in-flight rendering is off by default", () => {
+  const { directory, binary } = serviceDirectory();
+  try {
+    const read = (value?: string) =>
+      loadConfig({
+        env: { PI_MATH_RENDERER_SERVICE: binary, ...(value === undefined ? {} : { PI_MATH_RENDERER_STREAMING: value }) },
+        argv: [],
+        home: directory,
+        readSettings: () => ({}),
+      });
+
+    const byDefault = read();
+    assert.equal(byDefault.streaming, false);
+    // Off is not a disable reason: the extension is fully active, deferred.
+    assert.equal(byDefault.enabled, true);
+    assert.equal(byDefault.disabledReason, undefined);
+
+    assert.equal(read("1").streaming, true);
+    assert.equal(read("true").streaming, true);
+    assert.equal(read("on").streaming, true);
+    assert.equal(read("0").streaming, false);
+    assert.equal(read("off").streaming, false);
+    assert.equal(read("maybe").streaming, false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("PI_MATH_RENDERER=0 disables the extension", () => {
   const { directory, binary } = serviceDirectory();
   try {

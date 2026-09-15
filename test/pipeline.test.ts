@@ -40,29 +40,58 @@ function context(overrides: Partial<MarkdownContext> = {}): MarkdownContext {
   return { messageType: "assistant", isStreaming: false, availableWidth: 113, ...overrides };
 }
 
-test("a closed block renders while the message is still streaming", () => {
-  // Regression: the transformer used to bail out on `isStreaming`, so formulas
-  // only appeared once the whole message had been delivered.
+test("a streaming delta is skipped unless in-flight rendering is opted into", () => {
+  const untouched: MessageRenderer = {
+    cached() {
+      throw new Error("cached() must not be called for a skipped streaming delta");
+    },
+    placement() {
+      throw new Error("placement() must not be called for a skipped streaming delta");
+    },
+    renderMissing() {
+      throw new Error("renderMissing() must not be called for a skipped streaming delta");
+    },
+  };
+  const markdown = `Working through it:\n\n$$\n${FORMULA}\n$$\n\nand inline $x^{2}$ too`;
+  // Byte-identical, and no scan, layout, id allocation or service call.
+  assert.equal(renderDisplayMath(markdown, context({ isStreaming: true }), untouched), markdown);
+});
+
+test("a streaming delta renders when in-flight rendering is enabled", () => {
   const { stub } = stubRenderer();
   const markdown = `Working through it:\n\n$$\n${FORMULA}\n$$\n\nso the value is`;
-  const output = renderDisplayMath(markdown, context({ isStreaming: true }), stub);
+  const output = renderDisplayMath(markdown, context({ isStreaming: true }), stub, () => {}, {
+    allowStreaming: true,
+  });
   assert.ok(output.includes("\x1b_Ga=T,f=100"), "streaming pass should emit an image line");
   assert.ok(!output.includes("\\frac{1}{3}"));
   assert.ok(output.includes("Working through it:"));
   assert.ok(output.includes("so the value is"));
 });
 
+test("a finalized message renders with in-flight rendering off", () => {
+  const { stub } = stubRenderer();
+  const markdown = `$$\n${FORMULA}\n$$\n`;
+  const output = renderDisplayMath(markdown, context(), stub, () => {}, { allowStreaming: false });
+  assert.ok(output.includes("\x1b_Ga=T,f=100"), "message_end must still produce images");
+  assert.ok(!output.includes("\\frac{1}{3}"));
+});
+
 test("a half-written block stays as source", () => {
   const { stub } = stubRenderer();
   const markdown = `$$\n\\begin{aligned}\n\\int_0^\\infty e^{-ax^2}\\,dx &= \\frac{1}{2} \\\\`;
-  const output = renderDisplayMath(markdown, context({ isStreaming: true }), stub);
+  const output = renderDisplayMath(markdown, context({ isStreaming: true }), stub, () => {}, {
+    allowStreaming: true,
+  });
   assert.equal(output, markdown);
   assert.ok(!output.includes("\x1b_G"));
 });
 
 test("streaming and finalized messages render the same block", () => {
   const markdown = `$$\n${FORMULA}\n$$\n`;
-  const streaming = renderDisplayMath(markdown, context({ isStreaming: true }), stubRenderer().stub);
+  const streaming = renderDisplayMath(markdown, context({ isStreaming: true }), stubRenderer().stub, () => {}, {
+    allowStreaming: true,
+  });
   const finalized = renderDisplayMath(markdown, context(), stubRenderer().stub);
   // Image ids are per placement, so compare the shape, not the id.
   const shape = (text: string): string => text.replace(/i=\d+/g, "i=N");
@@ -123,9 +152,11 @@ test("inline math becomes a one-row image inside its line", () => {
   assert.ok(output.endsWith(" here."), output);
 });
 
-test("inline math is rendered while the message is still streaming", () => {
+test("inline math is rendered while the message is streaming when opted in", () => {
   const { stub } = stubRenderer();
-  const output = renderDisplayMath("The value is $x^{2}$ here", context({ isStreaming: true }), stub);
+  const output = renderDisplayMath("The value is $x^{2}$ here", context({ isStreaming: true }), stub, () => {}, {
+    allowStreaming: true,
+  });
   assert.ok(output.includes("\x1b_G"));
   assert.ok(!output.includes("$x^{2}$"));
 });

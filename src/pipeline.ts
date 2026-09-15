@@ -31,6 +31,18 @@ export interface MarkdownContext {
   availableWidth: number;
 }
 
+/** Transformer behaviour that is a choice rather than a fixed rule. */
+export interface RenderOptions {
+  /**
+   * Experimental, off by default: transform while the assistant is still
+   * writing. Off means a streaming delta is returned untouched, so nothing is
+   * scanned, rendered or re-placed until `message_end` re-runs the transformer
+   * with `isStreaming: false` (see `docs/extensions.md` in pi and the
+   * `message_end` handler that calls `updateContent(message, false)`).
+   */
+  allowStreaming?: boolean;
+}
+
 /** Replace the display math in one message's markdown with image blocks. */
 function renderDisplayPass(
   markdown: string,
@@ -85,17 +97,23 @@ function renderDisplayPass(
 /**
  * Replace the display and inline math in one message's markdown with images.
  *
- * Streaming messages are included: a formula becomes an image on the delta that
- * closes it, rather than only when the message is finished. Nothing
- * half-written reaches typst, because a span only matches once its closing
- * delimiter is present (and, for display math, at end of line).
+ * A streaming message is transformed only when `allowStreaming` is set: the
+ * deltas otherwise cost a full scan and re-flow of the message plus a kitty
+ * placement per formula per delta. Nothing half-written reaches typst either
+ * way, because a span only matches once its closing delimiter is present (and,
+ * for display math, at end of line).
  */
 export function renderDisplayMath(
   markdown: string,
   context: MarkdownContext,
   renderer: MessageRenderer,
   log: (message: string) => void = () => {},
+  options: RenderOptions = {},
 ): string {
+  // Checked before anything else: a skipped streaming delta must not scan, lay
+  // out, allocate ids, or block the frame on a cold render.
+  if (context.isStreaming && options.allowStreaming !== true) return markdown;
+
   const availableCols = Math.max(MIN_AVAILABLE_COLS, context.availableWidth);
   const display = renderDisplayPass(markdown, context, renderer, availableCols, log);
   try {

@@ -10,7 +10,7 @@ $$
 $$
 ```
 
-becomes a formula spanning as many terminal cells as it needs, and scrolls, resizes and redraws like ordinary text. Display math and inline math both render: an inline `$x^{2}$` becomes a one-cell-tall image inside its sentence, cut at the cell edges rather than scaled down, and streamed messages render as they arrive.
+becomes a formula spanning as many terminal cells as it needs, and scrolls, resizes and redraws like ordinary text. Display math and inline math both render: an inline `$x^{2}$` becomes a one-cell-tall image inside its sentence, cut at the cell edges rather than scaled down. Math renders when a message is finalized; transforming streaming deltas as they arrive is [experimental and off by default](#experimental-in-flight-rendering).
 
 ## Requirements
 
@@ -44,7 +44,7 @@ pi --extension /path/to/math-renderer/src/index.ts
 
 1. A [markdown transformer](https://github.com/earendil-works/pi) scans each rendered message for math, using the same rules as pi's own renderer. pi runs the hook for user, assistant and thinking markdown only, so tool output is never transformed, and neither is Markdown rendered by other components. Display math is `$$…$$` or `\[…\]` at the start of a line (at most three leading spaces), closing at end of line; inline math is `$…$`, `\(…\)` or `\[…\]` inside a line, with pi's guards against prices, `A_B` identifiers, whitespace-padded bodies and code spans. Fenced code blocks and indented code blocks are skipped.
 2. Uncached formulas are rendered in one batch by the math-conceal service (`render_formulas` over stdio JSON). The service is invoked synchronously so the image exists while the line is being produced; a cold batch costs ~140 ms regardless of how many formulas it contains, and cached formulas never reach the service.
-3. Streaming messages are transformed too, so a `$$…$$` block becomes an image on the delta that closes it instead of when the message is delivered. Nothing half-written reaches typst: a block only matches once its closing delimiter is at end of line, and a formula whose source is still changing simply keeps its LaTeX until it settles.
+3. A streaming delta is returned untouched by default. pi re-runs the transformer with `isStreaming: false` when the message is finalized, so a message is transformed exactly once, at the end. Opt into in-flight rendering (`PI_MATH_RENDERER_STREAMING=1`) to transform deltas as well, so a `$$…$$` block becomes an image on the delta that closes it; nothing half-written reaches typst, because a block only matches once its closing delimiter is at end of line, and a formula whose source is still changing keeps its LaTeX until it settles. See [Experimental: in-flight rendering](#experimental-in-flight-rendering).
 4. Each formula becomes an image line plus blank filler lines: a kitty placement (`c`x`r` cells, transmitted by file path, `C=1` so the terminal does not move the cursor) followed by the blank lines that occupy the rest of the rectangle. pi writes image lines verbatim and pads the filler lines, so the image occupies its rows without pi needing to know anything about images.
 5. Every placement is drawn with its own image id, and the id stays inside signed 32-bit. pi tracks images by the id on a line, and deleting that id removes *every* placement carrying it, so two placements that shared an id would erase each other; a negative id is dropped by the terminal outright.
 6. The image line starts with a reset escape before its centring spaces: a markdown line whose first character is a space would be indented by four or more columns and read as a code block.
@@ -78,16 +78,30 @@ Environment variables:
 | `PI_MATH_RENDERER_BASELINE_PT` | `11` | Typst baseline, one baseline equals one cell |
 | `PI_MATH_RENDERER_PPI` | derived | Override the derived ppi (see below) |
 | `PI_MATH_RENDERER_TIMEOUT_MS` | `30000` | Per-batch service timeout |
+| `PI_MATH_RENDERER_STREAMING` | off | **Experimental**; `1` renders math while the message is still streaming (see below) |
 | `PI_MATH_RENDERER_DEBUG` | off | Append a log to `~/.pi/agent/math-renderer/debug.log` |
 
 CLI flag and command:
 
 - `--no-math-images` disables rendering for one run
-- `/math-renderer` reports whether rendering is active, which service binary is in use, and the baseline
+- `--math-images-streaming` enables the experimental in-flight path for one run (same as `PI_MATH_RENDERER_STREAMING=1`)
+- `/math-renderer` reports whether rendering is active, which service binary is in use, the baseline, and whether experimental in-flight rendering is on
 
 `PI_MATH_RENDERER_PPI` is a diagnostic override. The derived value is what makes one typst baseline exactly one terminal cell, so the typst box snaps to whole cells and `px -> cells` stays exact; an arbitrary ppi generally breaks that and the placement is scaled to a rounded cell box. Leave it unset unless you are chasing a rendering problem.
 
-The transformer runs inside pi's render path, so a formula that is not cached yet blocks the frame for the length of one service call (~140 ms) — once per formula, at the moment it first appears; every later redraw, including each streaming delta, is served from the cache. A transform renders all of its uncached formulas in that single call, because one batch costs the same as one formula and a deferred render has no reliable second chance.
+The transformer runs inside pi's render path, so a formula that is not cached yet blocks the frame for the length of one service call (~140 ms) — once per formula, at the moment it first appears; every later redraw is served from the cache. A transform renders all of its uncached formulas in that single call, because one batch costs the same as one formula, and a deferred formula has no second chance once the frame is drawn. pi re-runs the transformer for restored messages and terminal width changes, and when a message is finalized — that finalized pass is what renders the math with in-flight rendering off.
+
+## Experimental: in-flight rendering
+
+Off by default. `PI_MATH_RENDERER_STREAMING=1` or `--math-images-streaming` transforms streaming deltas too, so math appears while the assistant is still writing rather than when the message is finalized. It is experimental because streaming is the expensive, visibly unstable path:
+
+- The whole message is re-scanned and its inline math re-flowed on **every** delta, and every formula re-emits a kitty placement with a fresh image id — about 100 bytes each and no image data, since `t=f` only sends the path, but that is N formulas x D deltas of terminal writes.
+- A formula that is not cached yet blocks the frame for the ~140 ms service call on the delta that closes it, mid-stream, instead of once at the end.
+- Text already on screen can re-flow as the message grows: an inline formula near a wrap boundary moves to another row, and each delta re-places it.
+- pi's `$…$` guards are contextual, so a body that is still being typed can transiently match — a `$x$` that goes on to be the price `$x$5` renders for one frame and reverts.
+- Placements made mid-message are subject to the viewport-edge clipping in [Limitations](#limitations), and the per-delta re-emission makes it more visible.
+
+With the default (off), a streaming message shows pi's normal Unicode LaTeX rendering and snaps to images once, when the message ends. The cache is shared between both paths: a formula rendered mid-stream is served from disk by the finalized pass, and vice versa.
 
 ## Limitations
 
@@ -113,7 +127,7 @@ There is no automated terminal test. These kitty behaviours were established by 
 - `d=I,i=<id>` deletes the image data **and every placement** of that id, so an id must never be shared.
 - Erasing a line (`CSI 2 K`) does not remove a placement that overlaps it.
 - A placement that extends past the bottom row is clipped, and kitty redraws it whole once the content scrolls.
-- Placements get a fresh image id on every transform, because ids must never be shared. A streaming message is transformed on every delta, so its placements are re-emitted each time — about 100 bytes each and no image data, since `t=f` only sends the path.
+- Placements get a fresh image id on every transform, because ids must never be shared. With in-flight rendering on, a streaming message is transformed on every delta, so its placements are re-emitted each time — about 100 bytes each, and no image data, since `t=f` only sends the path.
 
 When capturing a screen for pixel checks: a framebuffer thumbnail only reflects the most recent frame, so an image drawn earlier comes back missing even though it is on screen. Redraw the frame you want to inspect before capturing.
 
