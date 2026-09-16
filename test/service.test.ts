@@ -4,13 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  buildRequest,
-  lookUpOnPath,
-  parseResponses,
   renderBatch,
   RenderServiceError,
   resolveServiceBinary,
-  rocksBinCandidates,
   SERVICE_BINARY_NAME,
   type SpawnSyncFn,
 } from "../src/service.ts";
@@ -23,16 +19,28 @@ const batchOptions = {
   ppi: 196,
 };
 
-test("responses are keyed by node id", () => {
-  const stdout = [
-    '{"type":"formula_rendered","node_id":"a","status":"ok","path":"/tmp/a.png","width_px":10,"height_px":20}',
-    '{"type":"formula_rendered","node_id":"b","status":"error","diagnostics":[{"message":"bad tex"}]}',
-    "not json",
-    "",
-  ].join("\n");
-  const responses = parseResponses(stdout);
-  assert.equal(responses.size, 2);
-  assert.deepEqual(responses.get("a"), {
+test("unusable response lines are ignored and diagnostics are flattened", () => {
+  const spawn: SpawnSyncFn = () => ({
+    status: 0,
+    stderr: "",
+    stdout: [
+      '{"type":"formula_rendered","node_id":"a","status":"ok","path":"/tmp/a.png","width_px":10,"height_px":20}',
+      '{"type":"formula_rendered","node_id":"b","status":"error","diagnostics":[{"message":"bad tex"},"no closing brace"]}',
+      '{"type":"formula_rendered","node_id":"stranger","status":"ok","path":"/tmp/x.png","width_px":1,"height_px":1}',
+      '{"type":"something_else","node_id":"a"}',
+      "not json",
+      "",
+    ].join("\n"),
+  });
+  const responses = renderBatch(
+    [
+      { nodeId: "a", source: "A" },
+      { nodeId: "b", source: "B" },
+    ],
+    batchOptions,
+    spawn,
+  );
+  assert.deepEqual(responses[0], {
     nodeId: "a",
     status: "ok",
     path: "/tmp/a.png",
@@ -40,25 +48,32 @@ test("responses are keyed by node id", () => {
     heightPx: 20,
     diagnostics: [],
   });
-  assert.deepEqual(responses.get("b")?.diagnostics, ["bad tex"]);
+  assert.equal(responses[1]?.status, "error");
+  assert.deepEqual(responses[1]?.diagnostics, ["bad tex", "no closing brace"]);
+  assert.equal(responses.length, 2, "a response for an unrequested node is dropped");
 });
 
-test("request shape matches the service protocol", () => {
-  const request = JSON.parse(
-    buildRequest(
-      [{ nodeId: "n1", source: "#mitex(\"x\")" }],
-      { ...batchOptions, ppi: 195.6, workerCount: 99, requestId: "r1", cacheKey: "k" },
-    ),
-  );
+test("the request shape matches the service protocol", () => {
+  const sent: string[] = [];
+  const spawn: SpawnSyncFn = (_command, _args, options) => {
+    sent.push(options.input);
+    return { status: 0, stderr: "", stdout: '{"type":"formula_rendered","node_id":"n1","status":"ok","path":"/tmp/n.png","width_px":1,"height_px":1}\n' };
+  };
+  renderBatch([{ nodeId: "n1", source: '#mitex("x")' }], { ...batchOptions, ppi: 195.6 }, spawn);
+
+  const request = JSON.parse(sent[0]!.trim()) as Record<string, unknown>;
   assert.equal(request.type, "render_formulas");
-  assert.equal(request.request_id, "r1");
-  assert.equal(request.cache_key, "k");
-  assert.equal(request.ppi, 196);
-  assert.equal(request.worker_count, 8);
-  assert.equal(request.output_dir, "/tmp/cache");
+  assert.match(String(request.request_id), /^pi-math-renderer:/);
+  assert.equal(request.context_id, "pi-math-renderer");
+  assert.equal(request.context_rev, 1);
+  assert.equal(request.context_source, batchOptions.contextSource);
+  assert.equal(request.root, "/tmp");
+  assert.equal(request.output_dir, batchOptions.outputDir);
+  assert.equal(request.ppi, 196, "ppi is rounded for the service");
+  assert.equal(request.worker_count, 2);
   assert.deepEqual(request.inputs, {});
   assert.deepEqual(request.nodes, [
-    { node_id: "n1", node_rev: 1, kind: "math", source: "#mitex(\"x\")" },
+    { node_id: "n1", node_rev: 1, kind: "math", source: '#mitex("x")' },
   ]);
 });
 
@@ -98,17 +113,28 @@ test("a service that produces no output raises", () => {
   assert.throws(() => renderBatch([{ nodeId: "a", source: "A" }], batchOptions, spawn), RenderServiceError);
 });
 
-test("rocks candidates cover the nvim rocks tree", () => {
-  const candidates = rocksBinCandidates({ XDG_DATA_HOME: "/data" }, "/home/u");
-  assert.deepEqual(candidates, [
-    join("/data", "nvim", "rocks", "bin", SERVICE_BINARY_NAME),
-    join("/home/u", ".luarocks", "bin", SERVICE_BINARY_NAME),
-  ]);
-  // Without XDG_DATA_HOME the default location is used.
-  assert.equal(
-    rocksBinCandidates({}, "/home/u")[0],
-    join("/home/u", ".local", "share", "nvim", "rocks", "bin", SERVICE_BINARY_NAME),
-  );
+test("a rocks install is found without XDG_DATA_HOME or a PATH", () => {
+  const home = mkdtempSync(join(tmpdir(), "pi-math-renderer-home-"));
+  try {
+    const install = (path: string): string => {
+      mkdirSync(path, { recursive: true });
+      const binary = join(path, SERVICE_BINARY_NAME);
+      writeFileSync(binary, "#!/bin/sh\n");
+      chmodSync(binary, 0o755);
+      return binary;
+    };
+
+    // The default XDG location under the home directory.
+    const xdg = install(join(home, ".local", "share", "nvim", "rocks", "bin"));
+    assert.equal(resolveServiceBinary(undefined, { PATH: "" }, home), xdg);
+
+    // A luarocks install is the fallback when the rocks tree has nothing.
+    const luarocks = install(join(home, ".luarocks", "bin"));
+    rmSync(xdg, { force: true });
+    assert.equal(resolveServiceBinary(undefined, { PATH: "" }, home), luarocks);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("binary resolution prefers explicit, then env, then installed copies", () => {
@@ -135,9 +161,9 @@ test("binary resolution prefers explicit, then env, then installed copies", () =
     );
     assert.equal(resolveServiceBinary(undefined, { PATH: "", XDG_DATA_HOME: directory }, directory), undefined);
 
-    const onPath = lookUpOnPath(SERVICE_BINARY_NAME, { PATH: directory });
-    assert.equal(onPath, binary);
-    assert.equal(lookUpOnPath(SERVICE_BINARY_NAME, { PATH: "/nonexistent" }), undefined);
+    // On the PATH, for an install that is not in a rocks tree.
+    assert.equal(resolveServiceBinary(undefined, { PATH: directory }, "/nope"), binary);
+    assert.equal(resolveServiceBinary(undefined, { PATH: "/nonexistent" }, "/nope"), undefined);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

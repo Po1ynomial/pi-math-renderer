@@ -4,6 +4,10 @@
  * The service is a line-delimited JSON process: write one request per line, read
  * one response line per rendered node. See `service/src/protocol.rs` upstream.
  *
+ * One function is the whole conversation: formulas and geometry in, responses
+ * out. The request shape and the response parsing are internals, because the
+ * extension sends one request kind and has one thing to say about each node.
+ *
  * Rendering runs through `spawnSync` rather than a long-lived child because pi's
  * markdown transformer is synchronous: the image has to exist by the time the
  * line is returned, otherwise later renders keep serving cached component lines
@@ -38,19 +42,20 @@ export interface RenderedFormula {
   diagnostics: string[];
 }
 
+/** What a batch asks the service for, beyond the formulas themselves. */
 export interface RenderBatchOptions {
+  /** Rendering service executable. */
   binary: string;
+  /** Typst context document, carrying the page setup and the formula colour. */
   contextSource: string;
+  /** Working root for relative imports in the formulas. */
   root: string;
+  /** Directory the rendered images are written to. */
   outputDir: string;
+  /** Pixels per inch, derived from the cell geometry so one baseline is one cell. */
   ppi: number;
-  workerCount?: number;
+  /** How long the service may take before the batch is abandoned. */
   timeoutMs?: number;
-  inputs?: Record<string, string>;
-  requestId?: string;
-  contextId?: string;
-  contextRev?: number;
-  cacheKey?: string;
 }
 
 /** Minimal `spawnSync` surface, so tests can inject a fake. */
@@ -64,6 +69,13 @@ export class RenderServiceError extends Error {}
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+
+/** Protocol identity of the context document this client sends. */
+const CONTEXT_ID = "pi-math-renderer";
+/** Revision of that context document. The client builds one context per batch. */
+const CONTEXT_REV = 1;
+/** Workers the service renders a batch across. */
+const WORKER_COUNT = 2;
 
 const defaultSpawn: SpawnSyncFn = (command, args, options) => {
   try {
@@ -86,7 +98,7 @@ const defaultSpawn: SpawnSyncFn = (command, args, options) => {
 };
 
 /** Parse service output lines into responses keyed by node id. */
-export function parseResponses(stdout: string): Map<string, RenderedFormula> {
+function parseResponses(stdout: string): Map<string, RenderedFormula> {
   const responses = new Map<string, RenderedFormula>();
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
@@ -125,19 +137,18 @@ export function parseResponses(stdout: string): Map<string, RenderedFormula> {
 }
 
 /** Build the request line for a batch. */
-export function buildRequest(nodes: RenderNode[], options: RenderBatchOptions): string {
+function buildRequest(nodes: RenderNode[], options: RenderBatchOptions): string {
   const request = {
     type: "render_formulas",
-    request_id: options.requestId ?? `pi-math-renderer:${Date.now()}`,
-    ...(options.cacheKey ? { cache_key: options.cacheKey } : {}),
-    context_id: options.contextId ?? "pi-math-renderer",
-    context_rev: options.contextRev ?? 1,
+    request_id: `pi-math-renderer:${Date.now()}`,
+    context_id: CONTEXT_ID,
+    context_rev: CONTEXT_REV,
     context_source: options.contextSource,
     root: options.root,
-    inputs: options.inputs ?? {},
+    inputs: {},
     output_dir: options.outputDir,
     ppi: Math.max(1, Math.round(options.ppi)),
-    worker_count: Math.max(1, Math.min(8, options.workerCount ?? 2)),
+    worker_count: WORKER_COUNT,
     nodes: nodes.map((node) => ({
       node_id: node.nodeId,
       node_rev: 1,
@@ -152,7 +163,9 @@ export function buildRequest(nodes: RenderNode[], options: RenderBatchOptions): 
  * Render a batch of formulas.
  *
  * Throws {@link RenderServiceError} when the service cannot run at all; per-node
- * failures come back as `status: "error"` responses instead.
+ * failures come back as `status: "error"` responses instead. Responses come back
+ * in request order, with a synthetic error for a node the service did not
+ * mention.
  */
 export function renderBatch(
   nodes: RenderNode[],
@@ -193,11 +206,11 @@ function isExecutable(path: string): boolean {
   }
 }
 
-/** Rocks trees that may hold the service binary installed by the rock. */
-export function rocksBinCandidates(
-  env: NodeJS.ProcessEnv = process.env,
-  home = homedir(),
-): string[] {
+/**
+ * Where the rock installs the service, most specific first:
+ * the nvim rocks tree that `:Rocks install` writes to, then luarocks.
+ */
+function rocksBinCandidates(env: NodeJS.ProcessEnv = process.env, home = homedir()): string[] {
   const xdgData = env.XDG_DATA_HOME && env.XDG_DATA_HOME.length > 0
     ? env.XDG_DATA_HOME
     : join(home, ".local", "share");
@@ -208,10 +221,7 @@ export function rocksBinCandidates(
 }
 
 /** Look up an executable on `PATH` without spawning a shell. */
-export function lookUpOnPath(
-  name: string,
-  env: NodeJS.ProcessEnv = process.env,
-): string | undefined {
+function lookUpOnPath(name: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
   const raw = env.PATH ?? "";
   for (const entry of raw.split(delimiter)) {
     if (!entry) continue;
