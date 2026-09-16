@@ -19,10 +19,9 @@ test("typst string literals escape backslashes, quotes and newlines", () => {
   assert.equal(typstStringLiteral("a\nb"), '"a\\nb"');
 });
 
-test("mitex import is pinned and can be omitted", () => {
+test("the mitex import is pinned to the version math-conceal ships", () => {
+  assert.equal(DEFAULT_MITEX_PACKAGE, "@preview/mitex:0.2.7");
   assert.equal(mitexImport(), `#import "${DEFAULT_MITEX_PACKAGE}": mitex, mi\n`);
-  assert.equal(mitexImport(""), "");
-  assert.match(mitexImport("@preview/mitex:9.9.9"), /9\.9\.9/);
 });
 
 test("page prelude holds geometry and theme colour", () => {
@@ -68,10 +67,6 @@ test("the inline wrapper always clips to one cell", () => {
 test("math call selects the mitex entry point per display kind", () => {
   assert.equal(mathCall("x^2", "block"), '#mitex("x^2")');
   assert.equal(mathCall("x^2", "inline"), '#mi("x^2")');
-  assert.equal(
-    mathCall("x^2", "block", String.raw`\newcommand{\R}{\mathbb{R}}`),
-    String.raw`#mitex("\\newcommand{\\R}{\\mathbb{R}}\nx^2")`,
-  );
 });
 
 test("context document carries page setup, colour and import", () => {

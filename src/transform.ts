@@ -19,8 +19,6 @@ export interface DisplayMathSpan {
   end: number;
   /** LaTeX source without delimiters. */
   latex: string;
-  /** Delimiter that produced the span. */
-  delimiter: "$$" | "\\[";
 }
 
 /**
@@ -71,10 +69,7 @@ export function findDisplayMathSpans(markdown: string): DisplayMathSpan[] {
   let position = 0;
   while (position <= markdown.length) {
     let matched = false;
-    for (const [delimiter, pattern] of [
-      ["$$", DOLLAR_BLOCK],
-      ["\\[", BRACKET_BLOCK],
-    ] as const) {
+    for (const pattern of [DOLLAR_BLOCK, BRACKET_BLOCK]) {
       pattern.lastIndex = position;
       const match = pattern.exec(markdown);
       if (!match) continue;
@@ -82,7 +77,7 @@ export function findDisplayMathSpans(markdown: string): DisplayMathSpan[] {
       const end = position + match[0].length;
       matched = true;
       if (body && !fenced.has(position)) {
-        spans.push({ start: position, end, latex: body, delimiter });
+        spans.push({ start: position, end, latex: body });
       }
       position = end > position ? end : position + 1;
       break;

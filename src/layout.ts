@@ -16,7 +16,7 @@
 export const MAX_SPAN = 4096;
 
 /** Clamp a cell span into a sane range. */
-export function clampSpan(value: number): number {
+function clampSpan(value: number): number {
   if (!Number.isFinite(value)) return 1;
   return Math.max(1, Math.min(MAX_SPAN, Math.floor(value)));
 }

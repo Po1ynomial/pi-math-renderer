@@ -14,7 +14,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_BASELINE_PT, type CellSize } from "./layout.ts";
+import { DEFAULT_BASELINE_PT } from "./layout.ts";
 import { resolveServiceBinary } from "./service.ts";
 
 export interface Config {
@@ -35,8 +35,6 @@ export interface Config {
    * image on the delta that closes it rather than at `message_end`.
    */
   streaming: boolean;
-  /** Terminal cell size probe; injectable for tests. */
-  cellSize?: () => CellSize;
   debug: boolean;
 }
 
@@ -44,7 +42,6 @@ export interface ConfigEnvironment {
   env?: NodeJS.ProcessEnv;
   argv?: readonly string[];
   home?: string;
-  agentDir?: string;
   /** Read the persisted TUI mode; injectable for tests. */
   readSettings?: (path: string) => unknown;
 }
@@ -88,7 +85,7 @@ export function tuiModeFromArgv(argv: readonly string[]): string | undefined {
 }
 
 /** `tuiMode` persisted in settings.json, if present. */
-export function tuiModeFromSettings(readSettings: (path: string) => unknown): string | undefined {
+function tuiModeFromSettings(readSettings: (path: string) => unknown): string | undefined {
   try {
     const settings = readSettings(join(getAgentDir(), "settings.json"));
     if (settings && typeof settings === "object") {

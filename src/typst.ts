@@ -29,10 +29,6 @@ export interface TypstDocumentOptions {
   baselinePt?: number;
   /** Terminal cell size in pixels. */
   cell?: CellSize;
-  /** Extra LaTeX macro definitions prepended to the formula body. */
-  preamble?: string;
-  /** MiTeX package specifier, or an empty string to omit MiTeX. */
-  mitexPackage?: string;
 }
 
 /** Format a number as a typst point value. */
@@ -50,9 +46,8 @@ export function typstStringLiteral(value: string): string {
 }
 
 /** `#import` line bringing MiTeX's LaTeX (`mitex`) and inline (`mi`) entry points in scope. */
-export function mitexImport(mitexPackage = DEFAULT_MITEX_PACKAGE): string {
-  if (!mitexPackage) return "";
-  return `#import "${mitexPackage}": mitex, mi\n`;
+export function mitexImport(): string {
+  return `#import "${DEFAULT_MITEX_PACKAGE}": mitex, mi\n`;
 }
 
 /**
@@ -126,21 +121,16 @@ export function snapWrap(
 }
 
 /** MiTeX call for a formula body. */
-export function mathCall(latex: string, display: MathDisplay, preamble = ""): string {
-  const body = preamble ? `${preamble}\n${latex}` : latex;
+export function mathCall(latex: string, display: MathDisplay): string {
   const fn = display === "block" ? "mitex" : "mi";
-  return `#${fn}(${typstStringLiteral(body)})`;
+  return `#${fn}(${typstStringLiteral(latex)})`;
 }
 
 /**
  * Context document for a compile request: page setup, theme colours and imports.
  */
-export function buildContextSource(
-  colorHex: string,
-  options: { mitexPackage?: string; header?: string } = {},
-): string {
-  const parts = [options.header ?? "", pagePrelude(colorHex), mitexImport(options.mitexPackage)];
-  return parts.filter(Boolean).join("");
+export function buildContextSource(colorHex: string): string {
+  return pagePrelude(colorHex) + mitexImport();
 }
 
 /**
@@ -160,12 +150,12 @@ export function buildNodeSource(
     options.display === "inline" ? 1 : "auto",
   );
   return (
-    mitexImport(options.mitexPackage) +
+    mitexImport() +
     "#set page(width: auto, height: auto, margin: (x: 0pt, y: 0pt), fill: none)\n" +
     prefix +
     "\n" +
     sizePrelude(baselinePt) +
-    mathCall(options.latex, options.display, options.preamble) +
+    mathCall(options.latex, options.display) +
     "\n" +
     suffix
   );

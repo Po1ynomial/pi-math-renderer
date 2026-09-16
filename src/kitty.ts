@@ -30,7 +30,7 @@ export const MAX_IMAGE_ID = 0x7fffffff;
  * without wrapping or padding. That is what makes such a line a placement
  * rather than text, so the markdown passes have to be able to recognise one.
  */
-export const PLACEMENT_INTRO = "\x1b_G";
+const PLACEMENT_INTRO = "\x1b_G";
 
 /** True when a line carries a kitty placement, and pi will write it verbatim. */
 export function carriesPlacement(line: string): boolean {

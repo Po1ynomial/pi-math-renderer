@@ -11,8 +11,7 @@
  */
 
 /** Used when the theme does not expose a usable text colour. */
-const FALLBACK_DARK = "#e5e5e7";
-const FALLBACK_LIGHT = "#000000";
+const FALLBACK = "#e5e5e7";
 
 /** Minimal theme surface needed for colour extraction. */
 export interface ThemeLike {
@@ -87,8 +86,9 @@ export function colorFromTheme(theme: ThemeLike | undefined): string {
  * Colour used before a theme is available.
  *
  * pi initialises the theme during startup, so this only covers the window
- * between extension load and `session_start`.
+ * between extension load and `session_start`, when nothing knows whether the
+ * terminal is light or dark.
  */
-export function defaultFormulaColor(isLight = false): string {
-  return isLight ? FALLBACK_LIGHT : FALLBACK_DARK;
+export function defaultFormulaColor(): string {
+  return FALLBACK;
 }

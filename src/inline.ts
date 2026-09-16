@@ -45,11 +45,6 @@ function findClosing(source: string, closing: string, from: number): number {
   return index;
 }
 
-/** Mirrors `looksLikePendingDollarMath` in pi-tui: does the tail look like math? */
-function looksLikeLatex(source: string): boolean {
-  return /\\[A-Za-z]+|[_^=+*/<>()[\]|±≤≥≠≈∈→⇒∞∫∑√-]/.test(source);
-}
-
 /**
  * Inline math spans in one line, using the same rules as pi's own tokenizer
  * (`tokenizeInlineLatex` in pi-tui): `$…$`, `\(…\)` and `\[…\]` mid-text, with

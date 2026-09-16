@@ -51,5 +51,4 @@ test("unusable themes fall back to a readable default", () => {
     defaultFormulaColor(),
   );
   assert.equal(defaultFormulaColor(), "#e5e5e7");
-  assert.equal(defaultFormulaColor(true), "#000000");
 });

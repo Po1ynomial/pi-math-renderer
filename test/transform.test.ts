@@ -4,10 +4,10 @@ import { findDisplayMathSpans, replaceDisplayMath } from "../src/transform.ts";
 
 test("finds dollar and bracket display math", () => {
   assert.deepEqual(findDisplayMathSpans("$$x^2$$"), [
-    { start: 0, end: 7, latex: "x^2", delimiter: "$$" },
+    { start: 0, end: 7, latex: "x^2" },
   ]);
   assert.deepEqual(findDisplayMathSpans("\\[E = mc^2\\]"), [
-    { start: 0, end: 12, latex: "E = mc^2", delimiter: "\\[" },
+    { start: 0, end: 12, latex: "E = mc^2" },
   ]);
 });
 
