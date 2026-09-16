@@ -27,6 +27,20 @@ function stubRenderer(rows = 3) {
 /** Renderer stub that refuses everything, the way a broken formula does. */
 const refusing: FormulaPlacements = { placements: (requests) => requests.map(() => undefined) };
 
+/**
+ * Renderer stub whose display renders fail and whose inline renders succeed,
+ * which is what a formula that typst rejects in block mode looks like: the
+ * block key is remembered as failed while the inline key is still cold.
+ */
+const displayFails: FormulaPlacements = {
+  placements: (requests) =>
+    requests.map((request) =>
+      request.display === "inline"
+        ? { key: `inline:${request.latex}`, path: `/tmp/${request.latex}.png`, cols: 3, rows: 1 }
+        : undefined,
+    ),
+};
+
 function context(overrides: Partial<MarkdownContext> = {}): MarkdownContext {
   return { messageType: "assistant", isStreaming: false, availableWidth: 113, ...overrides };
 }
@@ -124,6 +138,17 @@ test("separate transform runs never reuse an id", () => {
 test("a formula that cannot be rendered keeps its source", () => {
   const markdown = `before\n\n$$\n${FORMULA}\n$$\n\nafter`;
   assert.equal(renderDisplayMath(markdown, context(), refusing), markdown);
+});
+
+test("a display block that could not be rendered keeps its source", () => {
+  // Regression: the inline pass skipped lines beginning with `$$` but not lines
+  // beginning with `\[`, so a single-line bracket block the display pass had
+  // left alone was typeset as inline math instead of staying as source.
+  const blocks = [`$$x^2$$\n`, `\\[x^2\\]\n`];
+  for (const markdown of blocks) {
+    assert.equal(renderDisplayMath(markdown, context(), refusing), markdown);
+    assert.equal(renderDisplayMath(markdown, context(), displayFails), markdown);
+  }
 });
 
 test("fenced code keeps its source even when it looks like display math", () => {

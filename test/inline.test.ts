@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { findInlineSpans, linePrefix, renderInlineMath } from "../src/inline.ts";
+import { findInlineSpans, renderInlineMath } from "../src/inline.ts";
 import type { FormulaPlacements, PlacedFormula } from "../src/render.ts";
 
 /** Renderer stub: one placement per request, `widthCells` cells wide. */
@@ -113,33 +113,6 @@ test("a render failure keeps the source line", () => {
 });
 
 const visible = (text: string): string => text.replace(/\x1b_G[^;]*;[^\x1b]*\x1b\\/g, "<IMG>");
-
-test("the line's block structure is parsed, not guessed", () => {
-  assert.deepEqual(linePrefix("plain text"), {
-    prefix: "",
-    continuation: "",
-    firstCols: 0,
-    continuationCols: 0,
-    code: false,
-  });
-  assert.deepEqual(linePrefix("  - item"), {
-    prefix: "  - ",
-    continuation: "    ",
-    firstCols: 4,
-    continuationCols: 4,
-    code: false,
-  });
-  assert.deepEqual(linePrefix("> quote"), {
-    prefix: "> ",
-    continuation: "> ",
-    firstCols: 2,
-    continuationCols: 2,
-    code: false,
-  });
-  assert.equal(linePrefix("    code").code, true);
-  assert.equal(linePrefix("\tcode").code, false, "one tab is three columns, pi expands it");
-  assert.equal(linePrefix(" \tcode").code, true);
-});
 
 test("indentation is kept once, not doubled", () => {
   const { stub } = stubRenderer(4);

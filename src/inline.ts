@@ -12,8 +12,10 @@
  * at the cell edges, never scaled down.
  */
 
-import { allocateImageId, displayCommand } from "./kitty.ts";
+import { allocateImageId, carriesPlacement, displayCommand } from "./kitty.ts";
 import type { FormulaPlacements, FormulaRequest, PlacedFormula } from "./render.ts";
+import { type LineRecord, scanLines } from "./structure.ts";
+import { beginsDisplayMath } from "./transform.ts";
 
 /** One inline math span inside a line. */
 export interface InlineSpan {
@@ -102,70 +104,6 @@ export function findInlineSpans(line: string): InlineSpan[] {
   return spans;
 }
 
-/**
- * Markdown structure in front of a line's content.
- *
- * The pass owns the line layout, so it has to keep the structure that made the
- * line what it is: blockquote rows need their `>` on every row, list
- * continuations must stay indented to the item's content column, and a line
- * indented four columns is a code block rather than a paragraph, so its LaTeX
- * must be left alone.
- */
-export interface LinePrefix {
-  /** Text that opens the first row, exactly as it appeared. */
-  prefix: string;
-  /** Text that opens every following row (indentation, `> `, item alignment). */
-  continuation: string;
-  firstCols: number;
-  continuationCols: number;
-  /** True for an indented code block: the line carries no markup, only indent. */
-  code: boolean;
-}
-
-/** Visible columns of a whitespace run; pi expands a tab to three spaces. */
-function whitespaceCols(text: string): number {
-  let columns = 0;
-  for (const character of text) columns += character === "\t" ? 3 : 1;
-  return columns;
-}
-
-const QUOTE_GROUP = /[ \t]*>[ \t]?/y;
-const LIST_MARKER = /(?:[-*+]|\d{1,9}[.)])[ \t]+/y;
-
-/** Parse the block structure in front of a line's content. */
-export function linePrefix(line: string): LinePrefix {
-  let index = 0;
-  let quotes = "";
-  let quoteContinuation = "";
-  for (;;) {
-    QUOTE_GROUP.lastIndex = index;
-    const match = QUOTE_GROUP.exec(line);
-    if (match === null) break;
-    index += match[0].length;
-    quotes += match[0];
-    quoteContinuation += `${/^[ \t]*/.exec(match[0])?.[0] ?? ""}> `;
-  }
-
-  const indent = /^[ \t]*/.exec(line.slice(index))?.[0] ?? "";
-  index += indent.length;
-  LIST_MARKER.lastIndex = index;
-  const marker = LIST_MARKER.exec(line)?.[0] ?? "";
-  index += marker.length;
-
-  const prefix = line.slice(0, index);
-  // A list marker becomes blanks so continuation rows line up with the item
-  // text; blockquote markers stay, because markdown needs them on every row.
-  const continuation = `${quoteContinuation}${" ".repeat(whitespaceCols(indent) + whitespaceCols(marker))}`;
-  const code = quotes === "" && marker === "" && whitespaceCols(indent) >= 4;
-  return {
-    prefix,
-    continuation,
-    firstCols: whitespaceCols(prefix),
-    continuationCols: whitespaceCols(continuation),
-    code,
-  };
-}
-
 /** Text runs and image atoms, in source order. */
 type Token =
   | { kind: "text"; text: string; width: number }
@@ -218,14 +156,13 @@ function wrapTokens(tokens: Token[], limit: number): { text: string; width: numb
 
 /** One-line replacement for a line, or `undefined` to keep the source. */
 function renderLine(
-  line: string,
+  record: LineRecord,
   spans: InlineSpan[],
   placed: (PlacedFormula | undefined)[],
   availableCols: number,
   log: (message: string) => void,
 ): string | undefined {
-  const structure = linePrefix(line);
-  if (structure.code) return undefined;
+  const { text: line, structure } = record;
 
   let cursor = structure.prefix.length;
   const tokens: Token[] = [];
@@ -262,9 +199,10 @@ function renderLine(
 /**
  * Replace the inline math in a message with one-row images.
  *
- * Lines that already carry a placement (display math replaced by the display
- * pass) and fenced code are left alone, as is any line whose layout cannot be
- * made to fit.
+ * Lines the pass leaves alone: fenced code, lines that already carry a
+ * placement, the delimiters of a display-math block (which belong to the
+ * display pass, rendered or not), indented code, and any line whose layout
+ * cannot be made to fit.
  */
 export function renderInlineMath(
   markdown: string,
@@ -272,26 +210,23 @@ export function renderInlineMath(
   renderer: FormulaPlacements,
   log: (message: string) => void = () => {},
 ): string {
-  const lines = markdown.split("\n");
-  const work: { index: number; line: string; spans: InlineSpan[]; placed: (PlacedFormula | undefined)[] }[] = [];
-  let fence: string | undefined;
+  const records = scanLines(markdown);
+  const work: { record: LineRecord; spans: InlineSpan[]; placed: (PlacedFormula | undefined)[] }[] = [];
 
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] as string;
-    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
-    if (marker !== undefined) {
-      fence = fence === undefined ? marker : marker[0] === fence[0] && marker.length >= fence.length ? undefined : fence;
-      continue;
-    }
-    if (fence !== undefined) continue;
-    if (line.includes("\x1b_G")) continue;
-    if (line.trimStart().startsWith("$$")) continue;
+  for (const record of records) {
+    if (record.fence) continue;
+    if (carriesPlacement(record.text)) continue;
+    // A display-math block belongs to the display pass even when its render
+    // failed and its source is still in the message: its delimiters are not
+    // inline math.
+    if (beginsDisplayMath(record.text)) continue;
     // An indented code block is not a paragraph: leave its contents alone, and
     // do not render formulas that would only be thrown away.
-    if (linePrefix(line).code) continue;
-    if (!line.includes("$") && !line.includes("\\(") && !line.includes("\\[")) continue;
-    const spans = findInlineSpans(line);
-    if (spans.length > 0) work.push({ index, line, spans, placed: [] });
+    if (record.structure.indented) continue;
+    const { text } = record;
+    if (!text.includes("$") && !text.includes("\\(") && !text.includes("\\[")) continue;
+    const spans = findInlineSpans(text);
+    if (spans.length > 0) work.push({ record, spans, placed: [] });
   }
   if (work.length === 0) return markdown;
 
@@ -310,12 +245,13 @@ export function renderInlineMath(
   }
 
   let emitted = 0;
-  for (const { index, line, spans, placed: linePlacements } of work) {
-    const replacement = renderLine(line, spans, linePlacements, availableCols, log);
+  const replacements = new Map<number, string>();
+  for (const { record, spans, placed: linePlacements } of work) {
+    const replacement = renderLine(record, spans, linePlacements, availableCols, log);
     if (replacement === undefined) continue;
-    lines[index] = replacement;
+    replacements.set(record.index, replacement);
     emitted += 1;
   }
   log(`inline lines=${work.length} replaced=${emitted}`);
-  return lines.join("\n");
+  return records.map((record) => replacements.get(record.index) ?? record.text).join("\n");
 }

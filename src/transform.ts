@@ -9,6 +9,8 @@
  * (`$…$`, `\(…\)`) to pi's own renderer.
  */
 
+import { scanLines } from "./structure.ts";
+
 /** A display-math block found in markdown source. */
 export interface DisplayMathSpan {
   /** Offset of the span start (first character of the block, including indent). */
@@ -30,34 +32,15 @@ export interface DisplayMathSpan {
 const DOLLAR_BLOCK = /^ {0,3}\$\$[ \t]*(?:\n)?([\s\S]*?)\$\$[ \t]*(?=\n|$)/my;
 const BRACKET_BLOCK = /^ {0,3}\\\[[ \t]*(?:\n)?([\s\S]*?)\\\][ \t]*(?=\n|$)/my;
 
-const FENCE_MARKER = /^ {0,3}(`{3,}|~{3,})/;
-
-interface Interval {
-  start: number;
-  end: number;
-}
-
-/** Character ranges covered by fenced code blocks. */
-export function fenceIntervals(markdown: string): Interval[] {
-  const intervals: Interval[] = [];
-  let offset = 0;
-  let fence: string | undefined;
-  let fenceStart = 0;
-  for (const line of markdown.split("\n")) {
-    const marker = FENCE_MARKER.exec(line)?.[1];
-    if (fence === undefined) {
-      if (marker) {
-        fence = marker;
-        fenceStart = offset;
-      }
-    } else if (marker && marker[0] === fence[0] && marker.length >= fence.length) {
-      intervals.push({ start: fenceStart, end: offset + line.length });
-      fence = undefined;
-    }
-    offset += line.length + 1;
-  }
-  if (fence !== undefined) intervals.push({ start: fenceStart, end: markdown.length });
-  return intervals;
+/**
+ * Does this line begin display math? The line-level half of the rules above.
+ *
+ * The inline pass asks this so it never typesets the delimiters of a block the
+ * display pass owns, including a block whose render failed and whose source is
+ * still in the message.
+ */
+export function beginsDisplayMath(line: string): boolean {
+  return /^ {0,3}(?:\$\$|\\\[)/.test(line);
 }
 
 /** Blank-line separator that keeps a replacement in its own paragraph. */
@@ -73,18 +56,17 @@ function trailingSeparator(boundary: string): string {
   return boundary.startsWith("\n") ? "\n" : "\n\n";
 }
 
-function insideAny(intervals: Interval[], offset: number): boolean {
-  for (const interval of intervals) {
-    if (offset >= interval.start && offset < interval.end) return true;
-  }
-  return false;
-}
-
 /**
  * Find every display-math span outside fenced code blocks, in source order.
  */
 export function findDisplayMathSpans(markdown: string): DisplayMathSpan[] {
-  const fences = fenceIntervals(markdown);
+  // Every candidate span begins at a line start, so fenced lines are tested by
+  // offset. The fence rule itself lives in the shared line scan.
+  const fenced = new Set(
+    scanLines(markdown)
+      .filter((line) => line.fence)
+      .map((line) => line.start),
+  );
   const spans: DisplayMathSpan[] = [];
   let position = 0;
   while (position <= markdown.length) {
@@ -99,7 +81,7 @@ export function findDisplayMathSpans(markdown: string): DisplayMathSpan[] {
       const body = (match[1] ?? "").trim();
       const end = position + match[0].length;
       matched = true;
-      if (body && !insideAny(fences, position)) {
+      if (body && !fenced.has(position)) {
         spans.push({ start: position, end, latex: body, delimiter });
       }
       position = end > position ? end : position + 1;

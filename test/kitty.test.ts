@@ -1,11 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  carriesPlacement,
   createImageIdAllocator,
   displayCommand,
   MAX_IMAGE_ID,
   sanitiseImageId,
 } from "../src/kitty.ts";
+
+test("a line carrying a display command is recognisable as a placement", () => {
+  // pi writes such a line verbatim, so the markdown passes have to spot it
+  // before they treat its text as ordinary markdown.
+  const command = displayCommand("/tmp/formula.png", 7, 13, 3);
+  assert.equal(carriesPlacement(`\x1b[39m   ${command}`), true);
+  assert.equal(carriesPlacement("   plain text"), false);
+});
 
 test("display command transmits by path and declares the cell rectangle", () => {
   const command = displayCommand("/tmp/formula.png", 0x11001d, 13, 3);

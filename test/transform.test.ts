@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fenceIntervals, findDisplayMathSpans, replaceDisplayMath } from "../src/transform.ts";
+import { findDisplayMathSpans, replaceDisplayMath } from "../src/transform.ts";
 
 test("finds dollar and bracket display math", () => {
   assert.deepEqual(findDisplayMathSpans("$$x^2$$"), [
@@ -60,13 +60,6 @@ test("multiple blocks are found in order and never overlap", () => {
 test("empty blocks are ignored", () => {
   assert.equal(findDisplayMathSpans("$$$$").length, 0);
   assert.equal(findDisplayMathSpans("$$\n   \n$$").length, 0);
-});
-
-test("fence intervals cover the whole block", () => {
-  const markdown = "a\n```\nx\n```\nb\n";
-  const intervals = fenceIntervals(markdown);
-  assert.equal(intervals.length, 1);
-  assert.equal(markdown.slice(intervals[0].start, intervals[0].end), "```\nx\n```");
 });
 
 test("replacements keep neighbouring text in separate paragraphs", () => {

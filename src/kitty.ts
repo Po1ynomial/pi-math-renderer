@@ -23,6 +23,20 @@
  */
 export const MAX_IMAGE_ID = 0x7fffffff;
 
+/**
+ * Start of every kitty graphics command this extension emits.
+ *
+ * pi treats a line containing this as an "image line": it is written verbatim,
+ * without wrapping or padding. That is what makes such a line a placement
+ * rather than text, so the markdown passes have to be able to recognise one.
+ */
+export const PLACEMENT_INTRO = "\x1b_G";
+
+/** True when a line carries a kitty placement, and pi will write it verbatim. */
+export function carriesPlacement(line: string): boolean {
+  return line.includes(PLACEMENT_INTRO);
+}
+
 /** Clamp an image id into the range kitty accepts, without wrapping signs. */
 export function sanitiseImageId(imageId: number): number {
   if (!Number.isFinite(imageId)) return 1;
@@ -44,7 +58,7 @@ export function displayCommand(path: string, imageId: number, cols: number, rows
   const payload = Buffer.from(path, "utf8").toString("base64");
   const id = sanitiseImageId(imageId);
   return (
-    `\x1b_Ga=T,f=100,q=2,t=f,c=${Math.max(1, Math.floor(cols))}` +
+    `${PLACEMENT_INTRO}a=T,f=100,q=2,t=f,c=${Math.max(1, Math.floor(cols))}` +
     `,r=${Math.max(1, Math.floor(rows))},C=1,i=${id};${payload}\x1b\\`
   );
 }
