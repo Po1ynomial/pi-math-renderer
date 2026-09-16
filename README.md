@@ -121,6 +121,8 @@ npm run check     # typecheck + unit tests
 
 Unit tests cover kitty command building, cell geometry, typst document shape, markdown scanning, the transform pass (including the streaming path), block assembly and image ids, the render index, configuration guards, and the rendered line structure of an image block.
 
+The vocabulary this code is written in is in [`CONTEXT.md`](./CONTEXT.md), and the decisions behind the less obvious parts, with the alternatives they rejected, are in [`docs/adr/`](./docs/adr/).
+
 There is no automated terminal test. These kitty behaviours were established by driving a hidden kitty window through `kitty-use` and reading the captured pixels; they are the constraints the placement code is built around:
 
 - `i=` ids are accepted up to 32-bit unsigned, but a placement with a **negative** id is dropped with no response at all (`q=2` silences the error). JavaScript's `&` turns any id above 2^31 negative, which is why ids are clamped numerically instead.
