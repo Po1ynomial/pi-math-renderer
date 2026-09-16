@@ -1,17 +1,16 @@
 /**
- * Formula rendering plus the on-disk index that keeps repeat renders free.
+ * Formula rendering plus the cache that keeps repeat renders free.
  *
- * The service re-renders a formula whenever its in-process cache is cold, and
- * that cache dies with the process — which is every render for a `spawnSync`
- * client. The index file below records the PNG that was produced for a render
- * key, so a formula is rendered once per (source, colours, geometry) and then
- * never again, including across pi restarts.
+ * Behind the one method in {@link FormulaPlacements}: the render key, the
+ * on-disk index, the batched service call, the failure memory and the cell
+ * geometry. Callers hand over the formulas in a message and get a placement per
+ * request back, or nothing for a formula that could not be rendered.
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
-import { DEFAULT_BASELINE_PT, type CellSize, naturalCells, renderPpi } from "./layout.ts";
+import { isAbsolute, join } from "node:path";
+import { DEFAULT_BASELINE_PT, type CellPlacement, type CellSize, naturalCells, renderPpi } from "./layout.ts";
+import { type RenderEntry, RenderIndex } from "./render-index.ts";
 import {
   type RenderedFormula,
   type RenderNode,
@@ -23,14 +22,6 @@ import { buildContextSource, buildNodeSource, type MathDisplay } from "./typst.t
 
 /** Bump to invalidate every cached PNG after a rendering change. */
 const RENDERER_VERSION = "2";
-
-/** One rendered formula on disk. */
-export interface RenderEntry {
-  key: string;
-  path: string;
-  widthPx: number;
-  heightPx: number;
-}
 
 /**
  * A formula to render.
@@ -44,12 +35,33 @@ export interface FormulaRequest {
   display: MathDisplay;
 }
 
-/** Stable lookup key for a request; also the key of `renderMissing`'s result. */
-export function requestId(request: FormulaRequest): string {
-  return `${request.display}\u0000${request.latex}`;
+/** A rendered formula, as the terminal will place it. */
+export interface PlacedFormula {
+  /** Render key; names the entry in the index file and appears in log lines. */
+  key: string;
+  /** PNG on disk, handed to the terminal as a path. */
+  path: string;
+  /** Whole terminal cells. */
+  cols: number;
+  rows: number;
 }
 
-export interface RenderKeyInput {
+/**
+ * The formula-image interface the markdown passes work through.
+ *
+ * Requests in, placements out, in the same order. A request with no placement
+ * (`undefined`) is a formula that could not be rendered, and the caller keeps
+ * its source. Rendering never throws: a failed formula, an unreachable service
+ * and a disabled renderer all answer `undefined`.
+ *
+ * Every placement is a cell rectangle in the current terminal, so a caller that
+ * needs a narrower block fits the rectangle itself; it does not re-render.
+ */
+export interface FormulaPlacements {
+  placements(requests: FormulaRequest[]): (PlacedFormula | undefined)[];
+}
+
+interface RenderKeyInput {
   latex: string;
   display: MathDisplay;
   colorHex: string;
@@ -65,7 +77,7 @@ export interface RenderKeyInput {
  * so it must not include anything that changes between renders of the same
  * formula (timestamps, session ids, widths).
  */
-export function renderKey(input: RenderKeyInput): string {
+function renderKey(input: RenderKeyInput): string {
   const canonical = [
     `v${RENDERER_VERSION}`,
     `display:${input.display}`,
@@ -79,76 +91,8 @@ export function renderKey(input: RenderKeyInput): string {
 }
 
 /** Node id handed to the service; also the stem of the output file name. */
-export function nodeIdFor(key: string): string {
+function nodeIdFor(key: string): string {
   return `pi-mr-${key.slice(0, 24)}`;
-}
-
-/**
- * Key to entry mapping persisted as JSON.
- *
- * Writes are atomic (temp file + rename) because a crash mid-write would
- * otherwise discard the whole cache.
- */
-export class RenderIndex {
-  private readonly file: string;
-  private entries: Map<string, RenderEntry> | undefined;
-  private dirty = false;
-
-  constructor(file: string) {
-    this.file = file;
-  }
-
-  /** Entries whose PNG no longer exists are dropped. */
-  get(key: string): RenderEntry | undefined {
-    const entry = this.load().get(key);
-    if (!entry) return undefined;
-    if (existsSync(entry.path)) return entry;
-    this.entries?.delete(key);
-    this.dirty = true;
-    return undefined;
-  }
-
-  set(entry: RenderEntry): void {
-    this.load().set(entry.key, entry);
-    this.dirty = true;
-  }
-
-  save(): void {
-    if (!this.dirty) return;
-    const entries = this.load();
-    try {
-      mkdirSync(dirname(this.file), { recursive: true });
-      const payload = JSON.stringify({ version: RENDERER_VERSION, entries: [...entries.values()] });
-      const temp = `${this.file}.tmp`;
-      writeFileSync(temp, payload, "utf8");
-      renameSync(temp, this.file);
-      this.dirty = false;
-    } catch {
-      // A cache write failure must never break rendering.
-    }
-  }
-
-  private load(): Map<string, RenderEntry> {
-    if (this.entries) return this.entries;
-    const entries = new Map<string, RenderEntry>();
-    try {
-      const raw = JSON.parse(readFileSync(this.file, "utf8")) as {
-        version?: string;
-        entries?: RenderEntry[];
-      };
-      if (raw.version === RENDERER_VERSION && Array.isArray(raw.entries)) {
-        for (const entry of raw.entries) {
-          if (entry && typeof entry.key === "string" && typeof entry.path === "string") {
-            entries.set(entry.key, entry);
-          }
-        }
-      }
-    } catch {
-      // Missing or corrupt index: start empty.
-    }
-    this.entries = entries;
-    return entries;
-  }
 }
 
 export interface FormulaRendererOptions {
@@ -171,12 +115,12 @@ export interface FormulaRendererOptions {
 }
 
 /**
- * Renders LaTeX display math and caches the result.
+ * Renders LaTeX math and caches the result.
  *
  * Failures are remembered for the lifetime of the instance so a broken formula
  * or a missing service cannot cause a spawn storm during repeated renders.
  */
-export class FormulaRenderer {
+export class FormulaRenderer implements FormulaPlacements {
   private readonly index: RenderIndex;
   private readonly options: FormulaRendererOptions;
   private readonly failedKeys = new Set<string>();
@@ -184,64 +128,48 @@ export class FormulaRenderer {
 
   constructor(options: FormulaRendererOptions) {
     this.options = options;
-    this.index = new RenderIndex(join(options.cacheDir, "index.json"));
-  }
-
-  /** Resolved ppi for the current theme/geometry; also part of the render key. */
-  ppi(): number {
-    if (this.options.ppi) return this.options.ppi;
-    return renderPpi(this.options.cellSize(), this.baselinePt());
-  }
-
-  baselinePt(): number {
-    return this.options.baselinePt ?? DEFAULT_BASELINE_PT;
-  }
-
-  /** Cache lookup only; never touches the service. */
-  cached(request: FormulaRequest): RenderEntry | undefined {
-    if (!this.enabled) return undefined;
-    const key = this.keyFor(request);
-    if (this.failedKeys.has(key)) return undefined;
-    return this.index.get(key);
-  }
-
-  get enabled(): boolean {
-    return this.options.serviceBinary !== undefined && !this.serviceUnavailable;
+    this.index = new RenderIndex(join(options.cacheDir, "index.json"), RENDERER_VERSION);
   }
 
   /**
-   * Render every formula that is not cached yet, in one batch.
+   * Placement for every request that can be drawn, in request order.
    *
-   * One service call carries the whole batch, and it costs the same whether it
-   * holds one formula or thirty (~140 ms for the process, measured), so nothing
-   * is deferred: a transform has no reliable second chance before the frame is
-   * drawn. pi does run the transformer again with `isStreaming: false` when the
-   * message is finalized (and for restored messages and width changes), but a
-   * formula deferred from one of those passes could still stay as LaTeX source
-   * for the life of the view.
+   * One service call carries every formula that is missing, and it costs the
+   * same whether it holds one formula or thirty (~140 ms for the process,
+   * measured), so nothing is deferred: a transform has no reliable second
+   * chance before the frame is drawn. pi does run the transformer again with
+   * `isStreaming: false` when the message is finalized (and for restored
+   * messages and width changes), but a formula deferred from one of those
+   * passes could still stay as LaTeX source for the life of the view.
+   *
+   * Repeated requests share one render and get one placement each, because the
+   * caller places one image per occurrence.
    */
-  renderMissing(requests: FormulaRequest[]): Map<string, RenderEntry> {
-    const result = new Map<string, RenderEntry>();
-    if (!this.enabled) return result;
+  placements(requests: FormulaRequest[]): (PlacedFormula | undefined)[] {
+    if (requests.length === 0) return [];
+    if (!this.enabled) return requests.map(() => undefined);
 
-    const pending: { request: FormulaRequest; key: string; node: RenderNode }[] = [];
-    const seen = new Set<string>();
-    for (const request of requests) {
-      const key = this.keyFor(request);
-      if (seen.has(key) || this.failedKeys.has(key)) continue;
-      seen.add(key);
+    const keys = requests.map((request) => this.keyFor(request));
+    const resolved = new Map<string, PlacedFormula | undefined>();
+    const pending: { key: string; node: RenderNode }[] = [];
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index] as string;
+      if (resolved.has(key)) continue;
+      // Provisional: a key stays unresolved until something places it.
+      resolved.set(key, undefined);
+      if (this.failedKeys.has(key)) continue;
       const entry = this.index.get(key);
       if (entry) {
-        result.set(requestId(request), entry);
+        resolved.set(key, this.placed(entry));
         continue;
       }
+      const request = requests[index] as FormulaRequest;
       pending.push({
-        request,
         key,
         node: { nodeId: nodeIdFor(key), source: this.nodeSource(request) },
       });
     }
-    if (pending.length === 0) return result;
+    if (pending.length === 0) return keys.map((key) => resolved.get(key));
 
     let responses: RenderedFormula[];
     try {
@@ -264,14 +192,16 @@ export class FormulaRenderer {
       } else {
         this.options.log?.(`render failed: ${String(error)}`);
       }
-      return result;
+      return keys.map((key) => resolved.get(key));
     }
 
+    const keysByNodeId = new Map(pending.map((item) => [item.node.nodeId, item.key]));
+    let rendered = 0;
     for (const response of responses) {
-      const item = pending.find((candidate) => candidate.node.nodeId === response.nodeId);
-      if (!item) continue;
+      const key = keysByNodeId.get(response.nodeId);
+      if (key === undefined) continue;
       const fail = (reason: string): void => {
-        this.failedKeys.add(item.key);
+        this.failedKeys.add(key);
         this.options.log?.(`formula render failed: ${reason}`);
       };
       if (response.status !== "ok" || !response.path || !response.widthPx || !response.heightPx) {
@@ -285,21 +215,38 @@ export class FormulaRenderer {
         continue;
       }
       const entry: RenderEntry = {
-        key: item.key,
+        key,
         path: response.path,
         widthPx: response.widthPx,
         heightPx: response.heightPx,
       };
       this.index.set(entry);
-      result.set(requestId(item.request), entry);
+      resolved.set(key, this.placed(entry));
+      rendered += 1;
     }
     this.index.save();
-    return result;
+    this.options.log?.(`rendered ${rendered}/${pending.length} formula(s) in one batch`);
+    return keys.map((key) => resolved.get(key));
+  }
+
+  private get enabled(): boolean {
+    return this.options.serviceBinary !== undefined && !this.serviceUnavailable;
+  }
+
+  /** Resolved ppi for the current theme/geometry; also part of the render key. */
+  private ppi(): number {
+    if (this.options.ppi) return this.options.ppi;
+    return renderPpi(this.options.cellSize(), this.baselinePt());
+  }
+
+  private baselinePt(): number {
+    return this.options.baselinePt ?? DEFAULT_BASELINE_PT;
   }
 
   /** Cell placement for an entry, given the terminal geometry. */
-  placement(entry: RenderEntry): { cols: number; rows: number } {
-    return naturalCells(entry.widthPx, entry.heightPx, this.options.cellSize());
+  private placed(entry: RenderEntry): PlacedFormula {
+    const cell: CellPlacement = naturalCells(entry.widthPx, entry.heightPx, this.options.cellSize());
+    return { key: entry.key, path: entry.path, cols: cell.cols, rows: cell.rows };
   }
 
   private keyFor(request: FormulaRequest): string {

@@ -1,38 +1,29 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { findInlineSpans, linePrefix, renderInlineMath, type InlineRenderer } from "../src/inline.ts";
-import type { FormulaRequest, RenderEntry } from "../src/render.ts";
+import { findInlineSpans, linePrefix, renderInlineMath } from "../src/inline.ts";
+import type { FormulaPlacements, PlacedFormula } from "../src/render.ts";
 
-/** Renderer stub: one PNG per distinct LaTeX source, no service involved. */
+/** Renderer stub: one placement per request, `widthCells` cells wide. */
 function stubRenderer(widthCells = 3) {
-  const entries = new Map<string, RenderEntry>();
   const requested: string[][] = [];
-  const stub: InlineRenderer = {
-    cached(request) {
-      return entries.get(`${request.display}:${request.latex}`);
-    },
-    renderMissing(requests) {
+  const stub: FormulaPlacements = {
+    placements(requests) {
       requested.push(requests.map((request) => request.latex));
-      const rendered = new Map<string, RenderEntry>();
-      for (const request of requests) {
-        const index = entries.size;
-        const entry: RenderEntry = {
-          key: `key-${index}`,
-          path: `/tmp/formula-${index}.png`,
-          widthPx: widthCells * 11,
-          heightPx: 23,
-        };
-        entries.set(`${request.display}:${request.latex}`, entry);
-        rendered.set(`${request.display}\u0000${request.latex}`, entry);
-      }
-      return rendered;
-    },
-    placement(entry) {
-      return { cols: Math.round(entry.widthPx / 11), rows: 1 };
+      return requests.map(
+        (request): PlacedFormula => ({
+          key: `${request.display}:${request.latex}`,
+          path: `/tmp/formula-${request.latex}.png`,
+          cols: widthCells,
+          rows: 1,
+        }),
+      );
     },
   };
-  return { stub, requested, entries };
+  return { stub, requested };
 }
+
+/** Renderer stub that refuses everything, the way a broken formula does. */
+const refusing: FormulaPlacements = { placements: (requests) => requests.map(() => undefined) };
 
 const idsIn = (text: string): number[] =>
   [...text.matchAll(/i=(\d+)/g)].map((match) => Number.parseInt(match[1]!, 10));
@@ -118,10 +109,7 @@ test("lines that already carry images and display math are skipped", () => {
 });
 
 test("a render failure keeps the source line", () => {
-  const stub = stubRenderer().stub;
-  const refusing: InlineRenderer = { ...stub, cached: () => undefined, renderMissing: () => new Map() };
-  const markdown = "value $x$ here";
-  assert.equal(renderInlineMath(markdown, 40, refusing), markdown);
+  assert.equal(renderInlineMath("value $x$ here", 40, refusing), "value $x$ here");
 });
 
 const visible = (text: string): string => text.replace(/\x1b_G[^;]*;[^\x1b]*\x1b\\/g, "<IMG>");
@@ -206,9 +194,11 @@ test("an indented code block keeps its source", () => {
   assert.ok(tabbed.includes("\x1b_G"), tabbed);
 });
 
-test("the same formula is rendered once for several occurrences", () => {
+test("the same formula in several places is placed once per occurrence", () => {
   const { stub, requested } = stubRenderer();
-  renderInlineMath("$x$ then $x$ again", 40, stub);
-  assert.deepEqual(requested, [["x"]]);
-  assert.equal(stub.cached({ latex: "x", display: "inline" } as FormulaRequest)?.path !== undefined, true);
+  const output = renderInlineMath("$x$ then $x$ again", 40, stub);
+  assert.deepEqual(requested, [["x", "x"]], "one call carries the whole message");
+  const ids = idsIn(output);
+  assert.equal(ids.length, 2);
+  assert.notEqual(ids[0], ids[1]);
 });

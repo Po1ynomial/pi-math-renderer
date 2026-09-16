@@ -1,55 +1,45 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { RenderEntry } from "../src/render.ts";
-import { renderDisplayMath, type MarkdownContext, type MessageRenderer } from "../src/pipeline.ts";
+import { renderDisplayMath, type MarkdownContext } from "../src/pipeline.ts";
+import type { FormulaPlacements, PlacedFormula } from "../src/render.ts";
 
 const FORMULA = "\\int_0^1 x^2 \\, dx = \\frac{1}{3}";
 
-/** Renderer stub: renders on demand into an in-memory "disk", never a service. */
-function stubRenderer() {
-  const entries = new Map<string, RenderEntry>();
+/** Renderer stub: places every request, no service and no cache involved. */
+function stubRenderer(rows = 3) {
   const requested: string[][] = [];
-  const stub: MessageRenderer = {
-    cached(request) {
-      return entries.get(request.latex);
-    },
-    placement() {
-      return { cols: 13, rows: 3 };
-    },
-    renderMissing(requests) {
+  const stub: FormulaPlacements = {
+    placements(requests) {
       requested.push(requests.map((request) => request.latex));
-      const rendered = new Map<string, RenderEntry>();
-      for (const { latex } of requests) {
-        const index = entries.size;
-        const entry: RenderEntry = {
-          key: `key-${index}`,
-          path: `/tmp/formula-${index}.png`,
-          widthPx: 200,
-          heightPx: 74,
-        };
-        entries.set(latex, entry);
-        rendered.set(latex, entry);
-      }
-      return rendered;
+      return requests.map(
+        (request): PlacedFormula => ({
+          key: `${request.display}:${request.latex}`,
+          path: `/tmp/formula-${request.latex}.png`,
+          cols: 13,
+          rows,
+        }),
+      );
     },
   };
-  return { stub, requested, entries };
+  return { stub, requested };
 }
+
+/** Renderer stub that refuses everything, the way a broken formula does. */
+const refusing: FormulaPlacements = { placements: (requests) => requests.map(() => undefined) };
 
 function context(overrides: Partial<MarkdownContext> = {}): MarkdownContext {
   return { messageType: "assistant", isStreaming: false, availableWidth: 113, ...overrides };
 }
 
+/** Image ids declared by the placements in a message. */
+function idsIn(text: string): number[] {
+  return [...text.matchAll(/i=(\d+)/g)].map((match) => Number.parseInt(match[1]!, 10));
+}
+
 test("a streaming delta is skipped unless in-flight rendering is opted into", () => {
-  const untouched: MessageRenderer = {
-    cached() {
-      throw new Error("cached() must not be called for a skipped streaming delta");
-    },
-    placement() {
-      throw new Error("placement() must not be called for a skipped streaming delta");
-    },
-    renderMissing() {
-      throw new Error("renderMissing() must not be called for a skipped streaming delta");
+  const untouched: FormulaPlacements = {
+    placements() {
+      throw new Error("placements() must not be called for a skipped streaming delta");
     },
   };
   const markdown = `Working through it:\n\n$$\n${FORMULA}\n$$\n\nand inline $x^{2}$ too`;
@@ -105,25 +95,35 @@ test("every uncached formula is requested in a single batch", () => {
   const output = renderDisplayMath(markdown, context(), stub);
   assert.deepEqual(requested, [formulas]);
   assert.equal([...output.matchAll(/\x1b_G/g)].length, 7, "all seven blocks should be images");
-  assert.equal([...output.matchAll(/\x1b_G/g)].length, 7);
 });
 
-test("a repeated formula is rendered once and placed once per occurrence", () => {
-  const { stub, requested } = stubRenderer();
-  const markdown = `$$\n${FORMULA}\n$$\n\n$$\n${FORMULA}\n$$`;
+test("a formula repeated in one message gets one id per placement", () => {
+  // Regression: ids were derived from the render key alone, so two placements
+  // of the same formula shared one id. pi deletes images by id when it rewrites
+  // a line, which removes every placement of that id, and only the rewritten
+  // line is redrawn, so the other occurrence lost its image for good.
+  const { stub } = stubRenderer();
+  const markdown = `$$\n${FORMULA}\n$$\n\n$$\n${FORMULA}\n$$\n`;
   const output = renderDisplayMath(markdown, context(), stub);
-  assert.deepEqual(requested, [[FORMULA]]);
-  const ids = [...output.matchAll(/i=(\d+)/g)].map((match) => match[1]);
+  const ids = idsIn(output);
   assert.equal(ids.length, 2);
-  assert.notEqual(ids[0], ids[1]);
+  assert.notEqual(ids[0], ids[1], "placements of one formula must not share an image id");
+});
+
+test("separate transform runs never reuse an id", () => {
+  // Two messages with identical text are separate placements too; ids must not
+  // be a function of the source, or the second message destroys the first.
+  const markdown = `$$\n${FORMULA}\n$$\n`;
+  const first = idsIn(renderDisplayMath(markdown, context(), stubRenderer().stub));
+  const second = idsIn(renderDisplayMath(markdown, context(), stubRenderer().stub));
+  assert.equal(first.length, 1);
+  assert.equal(second.length, 1);
+  assert.notEqual(first[0], second[0]);
 });
 
 test("a formula that cannot be rendered keeps its source", () => {
-  const { stub } = stubRenderer();
-  const refusing: MessageRenderer = { ...stub, renderMissing: () => new Map() };
   const markdown = `before\n\n$$\n${FORMULA}\n$$\n\nafter`;
-  const output = renderDisplayMath(markdown, context(), refusing);
-  assert.equal(output, markdown);
+  assert.equal(renderDisplayMath(markdown, context(), refusing), markdown);
 });
 
 test("fenced code keeps its source even when it looks like display math", () => {

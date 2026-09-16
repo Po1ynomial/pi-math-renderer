@@ -13,8 +13,7 @@
  */
 
 import { allocateImageId, displayCommand } from "./kitty.ts";
-import type { PlacementLookup } from "./blocks.ts";
-import type { FormulaRequest, RenderEntry } from "./render.ts";
+import type { FormulaPlacements, FormulaRequest, PlacedFormula } from "./render.ts";
 
 /** One inline math span inside a line. */
 export interface InlineSpan {
@@ -24,10 +23,6 @@ export interface InlineSpan {
   end: number;
   /** LaTeX source without delimiters. */
   latex: string;
-}
-
-export interface InlineRenderer extends PlacementLookup {
-  renderMissing(requests: FormulaRequest[]): Map<string, RenderEntry>;
 }
 
 /**
@@ -225,28 +220,31 @@ function wrapTokens(tokens: Token[], limit: number): { text: string; width: numb
 function renderLine(
   line: string,
   spans: InlineSpan[],
+  placed: (PlacedFormula | undefined)[],
   availableCols: number,
-  renderer: InlineRenderer,
   log: (message: string) => void,
 ): string | undefined {
   const structure = linePrefix(line);
   if (structure.code) return undefined;
-  const pieces: { span: InlineSpan; token?: Token }[] = spans.map((span) => ({ span }));
 
   let cursor = structure.prefix.length;
   const tokens: Token[] = [];
-  for (const piece of pieces) {
-    const before = line.slice(cursor, piece.span.start);
-    const entry = renderer.cached({ latex: piece.span.latex, display: "inline" });
-    if (!entry) {
-      log(`inline: no image for ${JSON.stringify(piece.span.latex.slice(0, 40))}`);
+  for (let index = 0; index < spans.length; index += 1) {
+    const span = spans[index] as InlineSpan;
+    const placement = placed[index];
+    if (!placement) {
+      log(`inline: no placement for ${JSON.stringify(span.latex.slice(0, 40))}`);
       return undefined;
     }
-    const { cols } = renderer.placement(entry);
-    const command = displayCommand(entry.path, allocateImageId(), cols, 1);
-    piece.token = { kind: "image", text: `${command}${" ".repeat(cols)}`, width: cols };
-    tokens.push(...textTokens(before), piece.token);
-    cursor = piece.span.end;
+    const before = line.slice(cursor, span.start);
+    const { cols } = placement;
+    const command = displayCommand(placement.path, allocateImageId(), cols, 1);
+    tokens.push(...textTokens(before), {
+      kind: "image",
+      text: `${command}${" ".repeat(cols)}`,
+      width: cols,
+    });
+    cursor = span.end;
   }
   tokens.push(...textTokens(line.slice(cursor)));
 
@@ -271,11 +269,11 @@ function renderLine(
 export function renderInlineMath(
   markdown: string,
   availableCols: number,
-  renderer: InlineRenderer,
+  renderer: FormulaPlacements,
   log: (message: string) => void = () => {},
 ): string {
   const lines = markdown.split("\n");
-  const work: { index: number; line: string; spans: InlineSpan[] }[] = [];
+  const work: { index: number; line: string; spans: InlineSpan[]; placed: (PlacedFormula | undefined)[] }[] = [];
   let fence: string | undefined;
 
   for (let index = 0; index < lines.length; index += 1) {
@@ -293,28 +291,27 @@ export function renderInlineMath(
     if (linePrefix(line).code) continue;
     if (!line.includes("$") && !line.includes("\\(") && !line.includes("\\[")) continue;
     const spans = findInlineSpans(line);
-    if (spans.length > 0) work.push({ index, line, spans });
+    if (spans.length > 0) work.push({ index, line, spans, placed: [] });
   }
   if (work.length === 0) return markdown;
 
-  const missing: FormulaRequest[] = [];
-  const seen = new Set<string>();
-  for (const { spans } of work) {
-    for (const span of spans) {
-      const request: FormulaRequest = { latex: span.latex, display: "inline" };
-      if (seen.has(span.latex) || renderer.cached(request)) continue;
-      seen.add(span.latex);
-      missing.push(request);
-    }
+  // One call for the whole message: the renderer batches what is missing, and
+  // repeated formulas come back as one placement per occurrence.
+  const requests: FormulaRequest[] = [];
+  for (const item of work) {
+    for (const span of item.spans) requests.push({ latex: span.latex, display: "inline" });
   }
-  if (missing.length > 0) {
-    const rendered = renderer.renderMissing(missing);
-    log(`inline rendered ${rendered.size}/${missing.length} formula(s)`);
+  const placed = renderer.placements(requests);
+
+  // Hand each line the slice of placements that belongs to it.
+  let cursor = 0;
+  for (const item of work) {
+    item.placed = item.spans.map(() => placed[cursor++] as PlacedFormula | undefined);
   }
 
   let emitted = 0;
-  for (const { index, line, spans } of work) {
-    const replacement = renderLine(line, spans, availableCols, renderer, log);
+  for (const { index, line, spans, placed: linePlacements } of work) {
+    const replacement = renderLine(line, spans, linePlacements, availableCols, log);
     if (replacement === undefined) continue;
     lines[index] = replacement;
     emitted += 1;

@@ -9,19 +9,19 @@
  * span, then inline math becomes one-row images inside their lines.
  */
 
-import { buildImageBlocks, type PlacementLookup } from "./blocks.ts";
+import { buildImageBlock } from "./image-block.ts";
+import { allocateImageId } from "./kitty.ts";
+import { fitToWidth } from "./layout.ts";
+import {
+  type FormulaPlacements,
+  type FormulaRequest,
+  type PlacedFormula,
+} from "./render.ts";
 import { renderInlineMath } from "./inline.ts";
-import type { FormulaRequest, RenderEntry } from "./render.ts";
 import { findDisplayMathSpans, replaceDisplayMath, type DisplayMathSpan } from "./transform.ts";
 
 /** Columns that must stay available for a block, so it never triggers a wrap. */
-export const MIN_AVAILABLE_COLS = 8;
-
-/** The part of `FormulaRenderer` the passes need. */
-export interface MessageRenderer extends PlacementLookup {
-  /** Render the uncached formulas; returns the entries that became available. */
-  renderMissing(requests: FormulaRequest[]): Map<string, RenderEntry>;
-}
+const MIN_AVAILABLE_COLS = 8;
 
 /** What pi tells the transformer about the Markdown it is rendering. */
 export interface MarkdownContext {
@@ -43,11 +43,49 @@ export interface RenderOptions {
   allowStreaming?: boolean;
 }
 
+/**
+ * One markdown block per span, in source order.
+ *
+ * Every placement takes a fresh image id, which is why the blocks are built per
+ * occurrence rather than per render. Deriving the id from the render key
+ * instead would make repeated formulas share one id, and pi's delete-by-id then
+ * erases every placement of that id while only redrawing the line it rewrote.
+ */
+function buildImageBlocks(
+  placed: (PlacedFormula | undefined)[],
+  spans: DisplayMathSpan[],
+  availableCols: number,
+  log: (message: string) => void,
+): Map<DisplayMathSpan, string> {
+  const blocks = new Map<DisplayMathSpan, string>();
+  spans.forEach((span, index) => {
+    const placement = placed[index];
+    if (!placement) {
+      log(`no placement for ${JSON.stringify(span.latex.slice(0, 40))}`);
+      return;
+    }
+    const fitted = fitToWidth({ cols: placement.cols, rows: placement.rows }, availableCols);
+    const block = buildImageBlock({
+      path: placement.path,
+      imageId: allocateImageId(),
+      placement: fitted,
+      availableCols,
+    });
+    const source = JSON.stringify(span.latex.slice(0, 60));
+    log(
+      `formula ${placement.key.slice(0, 8)} id=${block.imageId} -> ` +
+        `${block.cols}x${block.rows} cells from ${source}`,
+    );
+    blocks.set(span, block.text);
+  });
+  return blocks;
+}
+
 /** Replace the display math in one message's markdown with image blocks. */
 function renderDisplayPass(
   markdown: string,
   context: MarkdownContext,
-  renderer: MessageRenderer,
+  renderer: FormulaPlacements,
   availableCols: number,
   log: (message: string) => void,
 ): string {
@@ -64,25 +102,15 @@ function renderDisplayPass(
 
   let blocks: Map<DisplayMathSpan, string>;
   try {
-    const uncached = spans
-      .map((span): FormulaRequest => ({ latex: span.latex, display: "block" }))
-      .filter(
-        (request, index, all) =>
-          all.findIndex((candidate) => candidate.latex === request.latex) === index &&
-          !renderer.cached(request),
-      );
-    if (uncached.length > 0) {
-      const rendered = renderer.renderMissing(uncached);
-      log(`rendered ${rendered.size}/${uncached.length} formula(s)`);
-    }
-    blocks = buildImageBlocks(renderer, spans, availableCols, log);
+    const requests: FormulaRequest[] = spans.map((span) => ({ latex: span.latex, display: "block" }));
+    blocks = buildImageBlocks(renderer.placements(requests), spans, availableCols, log);
   } catch (error) {
     log(`render failed: ${String(error)}`);
     return markdown;
   }
   log(
     `transform width=${context.availableWidth} streaming=${context.isStreaming} ` +
-      `type=${context.messageType} spans=${spans.length} emitted=${blocks.size}`,
+      `type=${context.messageType} spans=${spans.length} placed=${blocks.size}`,
   );
   if (blocks.size === 0) return markdown;
 
@@ -106,7 +134,7 @@ function renderDisplayPass(
 export function renderDisplayMath(
   markdown: string,
   context: MarkdownContext,
-  renderer: MessageRenderer,
+  renderer: FormulaPlacements,
   log: (message: string) => void = () => {},
   options: RenderOptions = {},
 ): string {
