@@ -32,7 +32,7 @@ export interface MarkdownContext {
 }
 
 /** Transformer behaviour that is a choice rather than a fixed rule. */
-export interface RenderOptions {
+export interface TransformOptions {
   /**
    * Experimental, off by default: transform while the assistant is still
    * writing. Off means a streaming delta is returned untouched, so nothing is
@@ -41,6 +41,12 @@ export interface RenderOptions {
    * `message_end` handler that calls `updateContent(message, false)`).
    */
   allowStreaming?: boolean;
+  /**
+   * The `--no-math-images` flag, read per call so a flag set for one run
+   * disables rendering without unregistering anything. A disabled transformer
+   * returns the message untouched, without scanning it.
+   */
+  disabled?: boolean;
 }
 
 /**
@@ -125,29 +131,47 @@ function renderDisplayPass(
 /**
  * Replace the display and inline math in one message's markdown with images.
  *
+ * This is the transformer's whole contract: markdown in, markdown out, and
+ * nothing throws. pi renders the message whatever a transformer returns, so a
+ * failure of any kind, including one nobody anticipated, has to leave the
+ * message as it was rather than half transformed.
+ *
  * A streaming message is transformed only when `allowStreaming` is set: the
  * deltas otherwise cost a full scan and re-flow of the message plus a kitty
  * placement per formula per delta. Nothing half-written reaches typst either
  * way, because a span only matches once its closing delimiter is present (and,
  * for display math, at end of line).
  */
-export function renderDisplayMath(
+export function transformMessage(
   markdown: string,
   context: MarkdownContext,
   renderer: FormulaPlacements,
   log: (message: string) => void = () => {},
-  options: RenderOptions = {},
+  options: TransformOptions = {},
 ): string {
-  // Checked before anything else: a skipped streaming delta must not scan, lay
-  // out, allocate ids, or block the frame on a cold render.
+  // Checked before anything else: a disabled or skipped message must not scan,
+  // lay out, allocate ids, or block the frame on a cold render.
+  if (options.disabled === true) return markdown;
   if (context.isStreaming && options.allowStreaming !== true) return markdown;
 
   const availableCols = Math.max(MIN_AVAILABLE_COLS, context.availableWidth);
-  const display = renderDisplayPass(markdown, context, renderer, availableCols, log);
   try {
-    return renderInlineMath(display, availableCols, renderer, log);
+    const display = renderDisplayPass(markdown, context, renderer, availableCols, log);
+    try {
+      return renderInlineMath(display, availableCols, renderer, log);
+    } catch (error) {
+      // The display blocks are already placed and still correct, so the inline
+      // failure keeps them.
+      log(`inline failed: ${String(error)}`);
+      return display;
+    }
   } catch (error) {
-    log(`inline failed: ${String(error)}`);
-    return display;
+    // The logger is the caller's, and the contract holds even if it fails.
+    try {
+      log(`transform failed: ${String(error)}`);
+    } catch {
+      // Nothing left to report to.
+    }
+    return markdown;
   }
 }

@@ -1,7 +1,7 @@
 /**
  * pi-math-renderer
  *
- * Renders LaTeX display math in pi's markdown as kitty images.
+ * Renders LaTeX math in pi's markdown as kitty images.
  *
  * Flow: a markdown transformer finds `$$…$$` / `\[…\]` blocks, asks the
  * math-conceal render service for a PNG of each uncached formula, and replaces
@@ -10,19 +10,22 @@
  * markdown renderer treats lines containing a kitty escape sequence as opaque
  * "image lines", so the placement survives wrapping, scrolling and redraws.
  *
- * Everything except the transform is pure plumbing: key derivation, the on-disk
- * index, cell geometry, kitty command building and block assembly all live in
- * their own modules.
+ * This module is the composition root and nothing else: it reads the
+ * environment, builds one session, and registers the transformer, the flags and
+ * the status command with pi. The transformer's behaviour lives in
+ * `pipeline.ts`, so it can be tested without a TUI.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { getCapabilities, getCellDimensions } from "@earendil-works/pi-tui";
+import { getCapabilities, getCellDimensions, type TerminalCapabilities } from "@earendil-works/pi-tui";
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type Config } from "./config.ts";
-import { renderDisplayMath } from "./pipeline.ts";
+import type { CellSize } from "./layout.ts";
+import { transformMessage } from "./pipeline.ts";
 import { FormulaRenderer } from "./render.ts";
+import type { SpawnSyncFn } from "./service.ts";
 import { colorFromTheme, defaultFormulaColor } from "./theme.ts";
 
 /**
@@ -46,35 +49,70 @@ export interface Session {
   renderer: FormulaRenderer;
   config: Config;
   log: (message: string) => void;
+  /** The colour formulas are rendered in: the configured one, else the theme's. */
+  colorHex: () => string;
 }
 
-/** Build the renderer for the current environment. */
-export function createSession(colorHex: () => string = defaultFormulaColor): Session {
-  const config = loadConfig();
-  const cacheDir = join(getAgentDir(), "math-renderer");
+/**
+ * What building a session needs from its environment.
+ *
+ * Every field defaults to the process environment, the agent directory, the
+ * terminal and the real service, so production passes nothing. A test supplies
+ * its own, which is the only way to reach this wiring without a TUI, a service
+ * and a kitty terminal.
+ */
+export interface SessionEnvironment {
+  /** Resolved configuration. */
+  config?: Config;
+  /** Directory for the PNGs and the index file. */
+  cacheDir?: string;
+  /** Working root reported to the service (used for relative imports). */
+  root?: string;
+  /** Terminal cell size. */
+  cellSize?: () => CellSize;
+  /** Theme text colour, re-pointed by pi when the theme changes. */
+  themeColor?: () => string;
+  /** Service process adapter. */
+  spawnSync?: SpawnSyncFn;
+}
+
+/** The session's environment plus the terminal probe the extension gates on. */
+export interface RendererEnvironment extends SessionEnvironment {
+  /** Terminal capability probe. */
+  capabilities?: () => Pick<TerminalCapabilities, "images">;
+}
+
+/** Build the renderer and the logger for the current environment. */
+export function createSession(environment: SessionEnvironment = {}): Session {
+  const config = environment.config ?? loadConfig();
+  const cacheDir = environment.cacheDir ?? join(getAgentDir(), "math-renderer");
+  const themeColor = environment.themeColor ?? (() => defaultFormulaColor());
+  /** The configured colour wins over the theme's, for every render. */
+  const colorHex = (): string => config.color ?? themeColor();
   const log = createLogger(config.debug, join(cacheDir, "debug.log"));
   const renderer = new FormulaRenderer({
     serviceBinary: config.serviceBinary,
     cacheDir,
-    root: process.cwd(),
+    root: environment.root ?? process.cwd(),
     colorHex,
     baselinePt: config.baselinePt,
-    cellSize: () => getCellDimensions(),
+    cellSize: environment.cellSize ?? (() => getCellDimensions()),
     ppi: config.ppi,
     timeoutMs: config.timeoutMs,
+    spawnSync: environment.spawnSync,
     log,
   });
-  return { renderer, config, log };
+  return { renderer, config, log, colorHex };
 }
 
-export default function mathRenderer(pi: ExtensionAPI): void {
+export default function mathRenderer(pi: ExtensionAPI, environment: RendererEnvironment = {}): void {
   /**
    * Live theme colour. The renderer reads it on every transform and pi
-   * re-points `ctx.ui.theme` when the theme changes, so a theme switch costs one
+   * re-points this when the theme changes, so a theme switch costs one
    * re-render instead of leaving a stale image.
    */
-  let colorProvider: () => string = () => defaultFormulaColor();
-  const session = createSession(() => colorProvider());
+  let themeColor = environment.themeColor ?? (() => defaultFormulaColor());
+  const session = createSession({ ...environment, themeColor: () => themeColor() });
   const { config, log } = session;
 
   pi.registerFlag("no-math-images", {
@@ -115,7 +153,7 @@ export default function mathRenderer(pi: ExtensionAPI): void {
     log(`inactive: ${config.disabledReason}`);
     return;
   }
-  const capabilities = getCapabilities();
+  const capabilities = (environment.capabilities ?? getCapabilities)();
   if (capabilities.images !== "kitty") {
     log(`inactive: terminal image protocol is ${capabilities.images ?? "unsupported"}`);
     return;
@@ -124,21 +162,14 @@ export default function mathRenderer(pi: ExtensionAPI): void {
   if (streamingEnabled()) log("streaming rendering enabled (experimental)");
 
   pi.on("session_start", (_event, ctx) => {
-    colorProvider = () => config.color ?? colorFromTheme(ctx.ui.theme);
-    log(`formula colour ${colorProvider()}`);
+    themeColor = () => colorFromTheme(ctx.ui.theme);
+    log(`formula colour ${session.colorHex()}`);
   });
 
-  pi.registerMarkdownTransformer((markdown, context) => {
-    if (pi.getFlag("no-math-images") === true) return markdown;
-    // pi contains a throw from a transformer, but the fallback should be the
-    // untouched message, not whatever the pass had produced so far.
-    try {
-      return renderDisplayMath(markdown, context, session.renderer, log, {
-        allowStreaming: streamingEnabled(),
-      });
-    } catch (error) {
-      log(`transform failed: ${String(error)}`);
-      return markdown;
-    }
-  });
+  pi.registerMarkdownTransformer((markdown, context) =>
+    transformMessage(markdown, context, session.renderer, log, {
+      disabled: pi.getFlag("no-math-images") === true,
+      allowStreaming: streamingEnabled(),
+    }),
+  );
 }
