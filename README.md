@@ -119,7 +119,7 @@ npm install
 npm run check     # typecheck + unit tests
 ```
 
-Unit tests cover kitty command building, cell geometry, typst document shape, markdown scanning, the transform pass (including the streaming path), block assembly and image ids, the render index, configuration guards, and the rendered line structure of an image block.
+Unit tests cover kitty command building and image ids, cell geometry, typst document shape, markdown scanning and line structure, the transform pass (including the streaming and disabled paths), the render index, the service client and the request it sends, binary resolution, configuration guards, the extension wiring against a fake pi and a stubbed service, and the rendered line structure of an image block.
 
 The vocabulary this code is written in is in [`CONTEXT.md`](./CONTEXT.md), and the decisions behind the less obvious parts, with the alternatives they rejected, are in [`docs/adr/`](./docs/adr/).
 

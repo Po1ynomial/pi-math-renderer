@@ -97,7 +97,7 @@ A formula whose render failed and whose failure is remembered for the session, s
 _Avoid_: bad formula, error case
 
 **Formula colour**:
-The colour formulas are rendered in, taken from the theme. It is part of the render key, so a theme switch produces new images rather than recolouring the old ones.
+The colour formulas are rendered in: the configured colour if there is one, otherwise the theme's text colour. It is part of the render key, so a colour change produces new images rather than recolouring the old ones.
 _Avoid_: text colour, theme colour
 
 ### Markdown structure
