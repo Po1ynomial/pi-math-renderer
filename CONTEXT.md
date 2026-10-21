@@ -103,7 +103,7 @@ _Avoid_: text colour, theme colour
 ### Markdown structure
 
 **Line structure**:
-What a line is before any pass rewrites it: whether it is inside a fence, the block structure in front of its content, and whether it is indented code.
+What a line is before any pass rewrites it: whether it is inside a fence, what it is in a table (a header, a delimiter row or a body row), the block structure in front of its content, and whether it is indented code.
 _Avoid_: line type, metadata
 
 **Fence**:
@@ -119,8 +119,28 @@ A line indented four columns, which markdown reads as code. Its LaTeX is left al
 _Avoid_: code indent
 
 **Inline re-flow**:
-Rewriting a line into rows around its placements, because pi never wraps a line that carries one. The pass that does this owns the line's width arithmetic.
+Rewriting a line into rows around its placements, because pi never wraps a line that carries one. The pass that does this owns the line's width arithmetic, except on a table row, which pi's table renderer owns.
 _Avoid_: wrap, word wrap
+
+**Table block**:
+A run of lines the parser reads as one GFM table: a header row, a delimiter row with as many cells as the header, then body rows. A pass decides about a table as a whole, because a placement's width changes every column in it.
+_Avoid_: table, grid
+
+**Table row**:
+A line the parser reads as part of a table: the header row, its delimiter row, or a body row. A row needs no pipe - after the delimiter row every line is a row until a blank line or another block starts - and a table row may never be re-flowed, because a line break inside one is read as another row.
+_Avoid_: table line, cell line
+
+**Delimiter row**:
+The `| --- | --- |` row that makes the line above it a table header. It holds dashes and colons only, and needs a `:` or a `|`, so `---` alone is a thematic break rather than a one-column table.
+_Avoid_: separator row, divider
+
+**Table container**:
+The blockquote markers a table's lines share. A row has to open with the same ones the header did, or it belongs to the block the table sits in rather than to the table.
+_Avoid_: indentation, prefix
+
+**Advance spaces**:
+The blanks written after a placement's command, because kitty draws an image where the cursor already is and never moves it. In a table cell they are closed by a reset escape, or markdown trims them off the end of the cell and the image is drawn over the cell's border.
+_Avoid_: padding, spacer
 
 **Fullscreen mode**:
 pi's alternate-screen TUI, where a redraw deletes every placement and re-emits only the rows it considers changed. Placements injected through markdown do not survive that, so the extension stays inactive there.

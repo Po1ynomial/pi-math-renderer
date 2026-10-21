@@ -54,6 +54,8 @@ Inline formulas are rendered in MiTeX's inline mode and clipped to exactly one c
 
 Geometry is exact rather than approximate: formulas are rendered at a ppi that maps the 11pt baseline onto one cell height, and the typst document snaps the formula box to whole cells, so a 13x3 cell placement is a 13x3 cell image.
 
+A table is the exception to the inline pass owning the line, and it is handled as one: pi's table renderer sizes every column from the widest cell and pads the rest, so the pass marks the lines the parser reads as part of a table (`structure.ts`, from the same rule marked uses — a row needs no pipe, and the header and delimiter row have to agree on their cell count) and writes each row on one line. A row may not be re-flowed at all — the parser reads a line break anywhere in a row as another row, and the table comes back with the wrong columns. A cell's placement ends with a reset escape after its advance spaces, because the parser trims a cell's trailing whitespace and a trimmed run of spaces leaves the formula to be drawn over its own border. A display block that begins on a table row is a row of that table to the parser rather than a block, so it keeps its source as well. A table whose columns would no longer fit the available width once its formulas are images keeps its LaTeX, which hands it back to pi's Unicode typesetting.
+
 Rows are deliberately *not* one line per image row. pi renders one markdown paragraph per line, and consecutive paragraphs are separated by an empty line, which would cut a multi-row image into bands. The `test/image-block.test.ts` layout test renders the block through pi's own `Markdown` component and asserts the block occupies exactly as many lines as the image has rows.
 
 ## Caching
@@ -106,7 +108,8 @@ With the default (off), a streaming message shows pi's normal Unicode LaTeX rend
 ## Limitations
 
 - **A formula wider than the line stays as LaTeX.** Kitty placements cannot be split across terminal rows, so a formula that needs more than the full content width (a wide matrix, say) is left to pi's Unicode renderer. Multi-line inline math (`$…$` spanning lines) is also left alone.
-- **Inline math makes its whole line an image line to pi.** Such a line is written verbatim, which is what lets the re-flow own the layout — but pi then skips it for selection and search highlighting. The text is still in the session for the model, and copying reads the line with the escapes stripped.
+- **Inline math makes its whole line an image line to pi.** Such a line is written verbatim, which is what lets the re-flow own the layout — but pi then skips it for selection and search highlighting. The text is still in the session for the model, and copying reads the line with the escapes stripped. A table row carrying math is the same: that row is written verbatim.
+- **Math in a table renders only while the table still fits.** A table's columns are sized by pi, so a table whose columns would exceed the available width once its formulas are images keeps its LaTeX and is typeset by pi's Unicode renderer instead. The test is deliberately conservative: it counts the markdown a cell still carries, so a table that would just fit by pi's own measure may be left alone. A formula in a cell is clipped to one cell tall, like inline math anywhere else, and the formula image takes the theme's text colour rather than the bold of a header cell. A display block that begins on a table row keeps its LaTeX for the same reason: the parser reads it as a row, and a block's image line would end the table.
 - **Fullscreen TUI mode is not supported.** pi's alternate-screen renderer manages images itself, from a metadata registry that only its own `Image` component populates. A placement injected through markdown is not in that registry, so a frame that needs an image redraw deletes every placement and re-emits only the rows it changed — the markdown image lines above come back blank. In `fullscreen` mode the extension stays inactive and display math falls back to pi's Unicode renderer.
 - **Kitty graphics only.** Detection uses pi-tui's terminal capabilities; `PI_IMAGE_PROTOCOL` overrides it.
 - **A formula is one image line to pi.** pi can only reserve rows for an image whose following lines are zero-width, and markdown pads every non-image line to the full width, so a block is booked as a single image row. A formula placed on the last row of the viewport is therefore clipped by the terminal until the screen next scrolls; kitty keeps the whole placement and redraws it complete at the new position.
@@ -119,7 +122,7 @@ npm install
 npm run check     # typecheck + unit tests
 ```
 
-Unit tests cover kitty command building and image ids, cell geometry, typst document shape, markdown scanning and line structure, the transform pass (including the streaming and disabled paths), the render index, the service client and the request it sends, binary resolution, configuration guards, the extension wiring against a fake pi and a stubbed service, and the rendered line structure of an image block.
+Unit tests cover kitty command building and image ids, cell geometry, typst document shape, markdown scanning and line structure (including which lines the parser reads as one table), the transform pass (including the streaming and disabled paths), the render index, the service client and the request it sends, binary resolution, configuration guards, the extension wiring against a fake pi and a stubbed service, the rendered line structure of an image block, and the rendered grid of a table carrying math.
 
 The vocabulary this code is written in is in [`CONTEXT.md`](./CONTEXT.md), and the decisions behind the less obvious parts, with the alternatives they rejected, are in [`docs/adr/`](./docs/adr/).
 
@@ -129,6 +132,7 @@ There is no automated terminal test. These kitty behaviours were established by 
 - `d=I,i=<id>` deletes the image data **and every placement** of that id, so an id must never be shared.
 - Erasing a line (`CSI 2 K`) does not remove a placement that overlaps it.
 - A placement that extends past the bottom row is clipped, and kitty redraws it whole once the content scrolls.
+- A placement draws through the spaces that reserve its cells, in a table cell as anywhere else. The spaces a cell is padded with are the table renderer's, not the placement's: when the parser trims the placement's own advance spaces off the end of the cell, the image is drawn across the cell's border instead.
 - Placements get a fresh image id on every transform, because ids must never be shared. With in-flight rendering on, a streaming message is transformed on every delta, so its placements are re-emitted each time — about 100 bytes each, and no image data, since `t=f` only sends the path.
 
 When capturing a screen for pixel checks: a framebuffer thumbnail only reflects the most recent frame, so an image drawn earlier comes back missing even though it is on screen. Redraw the frame you want to inspect before capturing.
