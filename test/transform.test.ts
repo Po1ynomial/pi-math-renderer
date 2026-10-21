@@ -29,6 +29,17 @@ test("inline math is left to pi's own renderer", () => {
   assert.equal(findDisplayMathSpans("the value \\(x^2\\) is small").length, 0);
 });
 
+test("a block that begins on a table row belongs to the table", () => {
+  // The parser reads the `$$` lines as more rows of the table above them,
+  // because no blank line separates the two blocks. Replacing the block would
+  // insert the blank filler lines that end the table.
+  assert.deepEqual(findDisplayMathSpans("| a | b |\n| --- | --- |\n$$\nx^2\n$$"), []);
+  // With a blank line between them it is a display block again.
+  assert.equal(findDisplayMathSpans("| a | b |\n| --- | --- |\n\n$$\nx^2\n$$\n").length, 1);
+  // So is a block after a rule, which ends the table.
+  assert.equal(findDisplayMathSpans("| a | b |\n| --- | --- |\n\n---\n\n$$\nx^2\n$$\n").length, 1);
+});
+
 test("fenced code blocks are skipped", () => {
   const markdown = "```latex\n$$x^2$$\n```\n\n$$y^2$$\n";
   const spans = findDisplayMathSpans(markdown);

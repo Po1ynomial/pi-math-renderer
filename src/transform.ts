@@ -58,11 +58,14 @@ function trailingSeparator(boundary: string): string {
  * Find every display-math span outside fenced code blocks, in source order.
  */
 export function findDisplayMathSpans(markdown: string): DisplayMathSpan[] {
-  // Every candidate span begins at a line start, so fenced lines are tested by
-  // offset. The fence rule itself lives in the shared line scan.
-  const fenced = new Set(
+  // Every candidate span begins at a line start, so fenced and table lines are
+  // tested by offset. The rules for both live in the shared line scan: a display
+  // block that begins on a table row is a row of that table to the parser, not
+  // a block, and replacing it would insert the blank filler lines that end the
+  // table.
+  const owned = new Set(
     scanLines(markdown)
-      .filter((line) => line.fence)
+      .filter((line) => line.fence || line.table !== undefined)
       .map((line) => line.start),
   );
   const spans: DisplayMathSpan[] = [];
@@ -76,7 +79,7 @@ export function findDisplayMathSpans(markdown: string): DisplayMathSpan[] {
       const body = (match[1] ?? "").trim();
       const end = position + match[0].length;
       matched = true;
-      if (body && !fenced.has(position)) {
+      if (body && !owned.has(position)) {
         spans.push({ start: position, end, latex: body });
       }
       position = end > position ? end : position + 1;
