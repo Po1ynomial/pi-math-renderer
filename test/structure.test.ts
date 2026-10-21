@@ -146,6 +146,18 @@ test("a table needs a delimiter row, pipes or no pipes", () => {
   assert.deepEqual(tableRoles("| h |\n| --- | extra |\n"), ["-", "-", "-"]);
   // `# h` is a heading, so the delimiter-looking line under it is a paragraph.
   assert.deepEqual(tableRoles("# h | x |\n| --- |\n"), ["-", "-", "-"]);
+  // The header and the delimiter row have to agree on their cell count, or the
+  // parser reads the pair as a paragraph.
+  assert.deepEqual(tableRoles("| a | b |\n| --- | --- | --- |\n| 1 | 2 |"), [
+    "-",
+    "-",
+    "-",
+  ]);
+  assert.deepEqual(tableRoles("| a | b | c |\n| --- | --- |\n| 1 | 2 |"), [
+    "-",
+    "-",
+    "-",
+  ]);
 });
 
 test("a table inside another block is still a table", () => {

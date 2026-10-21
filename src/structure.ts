@@ -244,14 +244,28 @@ function tableRowLike(record: LineRecord, quote: string): boolean {
 }
 
 /**
+ * True when the header row and the delimiter row agree on their cell count.
+ *
+ * The parser refuses the pair otherwise: `h` over `--- | ---` is a paragraph
+ * over a thematic break rather than a one-cell table over two cells, and a
+ * delimiter row with a cell the header does not have makes the run a paragraph
+ * rather than a table. Marking a line the parser does not read as a row would
+ * hold its formulas back for nothing.
+ */
+function headerMatchesDelimiter(header: string, delimiter: string): boolean {
+  return splitTableCells(header).length === splitTableCells(delimiter).length;
+}
+
+/**
  * Mark the lines the parser reads as one table.
  *
- * A table starts at a header line whose successor is a delimiter row, and runs
- * on through every following line until a blank line or another block starts,
- * pipes or no pipes: after `| a | b |` and `| --- | --- |`, a plain line of
- * prose is a one-cell row. The walk consumes a whole table before it looks for
- * the next one, which is what the parser does too: a second header and
- * delimiter inside a table's rows are simply more rows.
+ * A table starts at a header line whose successor is a delimiter row with as
+ * many cells as the header, and runs on through every following line until a
+ * blank line or another block starts, pipes or no pipes: after `| a | b |` and
+ * `| --- | --- |`, a plain line of prose is a one-cell row. The walk consumes a
+ * whole table before it looks for the next one, which is what the parser does
+ * too: a second header and delimiter inside a table's rows are simply more
+ * rows.
  */
 function markTableLines(records: LineRecord[]): void {
   let quote: string | undefined;
@@ -271,7 +285,9 @@ function markTableLines(records: LineRecord[]): void {
     const container = record.structure.quote;
     if (next.structure.quote !== container) continue;
     if (next.fence || next.structure.indented) continue;
-    if (!isTableDelimiter(containerLine(next, container))) continue;
+    const delimiter = containerLine(next, container);
+    if (!isTableDelimiter(delimiter)) continue;
+    if (!headerMatchesDelimiter(lineContent(record), delimiter)) continue;
     record.table = "header";
     next.table = "delimiter";
     quote = container;
