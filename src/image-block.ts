@@ -19,19 +19,17 @@
  * - Rows are blank lines rather than one line per image row. pi renders one
  *   markdown paragraph per line and inserts an empty line between consecutive
  *   paragraphs, which would cut the image into bands.
- * - The centring spaces come *after* a reset escape. A line whose first
- *   character is a space is indented by four or more columns here, and markdown
- *   would read it as an indented code block, adding a code fence and shifting
- *   the image.
+ * - The centring spaces come *after* a reset escape ({@link RESET_ESCAPE}). A
+ *   line whose first character is a space is indented by four or more columns
+ *   here, and markdown would read it as an indented code block, adding a code
+ *   fence and shifting the image.
  */
 
-import { displayCommand } from "./kitty.ts";
+import { displayCommand, RESET_ESCAPE } from "./kitty.ts";
 import { centerPrefixCols, type CellPlacement } from "./layout.ts";
 
 /** Zero-width space: turns a filler line into a paragraph pi will render. */
 const FILLER = "\u200b";
-/** Reset escape in front of the centring spaces; invisible, keeps the line start non-blank. */
-const LINE_HEAD = "\x1b[39m";
 
 export interface ImageBlockInput {
   path: string;
@@ -60,7 +58,7 @@ export function buildImageBlock(input: ImageBlockInput): ImageBlock {
   const cols = Math.max(1, Math.floor(input.placement.cols));
   const rows = Math.max(1, Math.floor(input.placement.rows));
   const prefix = " ".repeat(centerPrefixCols(cols, input.availableCols));
-  const head = LINE_HEAD + prefix + displayCommand(input.path, input.imageId, cols, rows);
+  const head = RESET_ESCAPE + prefix + displayCommand(input.path, input.imageId, cols, rows);
 
   if (rows === 1) return { text: head, cols, rows, imageId: input.imageId };
 

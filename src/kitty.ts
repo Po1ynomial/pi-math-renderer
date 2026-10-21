@@ -37,6 +37,19 @@ export function carriesPlacement(line: string): boolean {
   return line.includes(PLACEMENT_INTRO);
 }
 
+/**
+ * Reset escape that keeps a placement's advance spaces in the line.
+ *
+ * pi writes a line carrying a placement verbatim, which is what lets a
+ * placement own its cells - but only if the spaces that advance the cursor over
+ * the image reach the terminal. Two places need zero-width company for them: in
+ * front of an image block's centring spaces, so a line starting with spaces is
+ * not read as indented code, and after the advance spaces inside a table cell,
+ * where the cell's trailing whitespace is trimmed before the table renderer
+ * measures the cell.
+ */
+export const RESET_ESCAPE = "\x1b[39m";
+
 /** Clamp an image id into the range kitty accepts, without wrapping signs. */
 export function sanitiseImageId(imageId: number): number {
   if (!Number.isFinite(imageId)) return 1;
